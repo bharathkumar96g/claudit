@@ -67,6 +67,7 @@ Cheap deterministic filter first, model only where judgment is needed; structure
 - One row per JSONL line in `events`; one row per text chunk the model saw or produced in `segments`; one row per hit in `findings`; model verdicts in `judgments` and `semantic_findings`. DuckDB, single file.
 - **Checkpointed by byte offset per file.** Reruns process only appended lines. A trailing partial line (Claude Code mid-write) is left for the next run.
 - Inserts are idempotent on content-derived ids; each file commits in one transaction, so a crash mid-file replays cleanly.
+- Events are keyed by the transcript's message `uuid`. A resumed Claude Code session copies earlier history into its new file, so the same message can appear in several files; it's counted once.
 
 ## Evaluation
 

@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-DETECTOR_VERSION = 1
+DETECTOR_VERSION = 2
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
@@ -39,9 +39,13 @@ def luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
+_PK_HEADER = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+
+
 def mask(value: str, category: str) -> str:
     if category == "private_key":
-        return value.splitlines()[0][:40] + "…"
+        header = _PK_HEADER.match(value)
+        return (header.group(0) if header else "-----BEGIN PRIVATE KEY-----") + "…"
     if len(value) <= 8:
         return "*" * len(value)
     return f"{value[:4]}…{value[-2:]}"
@@ -81,11 +85,16 @@ _CODE_REF = re.compile(
     r"^(?:\$|\{|os\.|process\.|env\b|ENV\b|getenv|config\.|settings\.|self\.|this\.|None$|null$|true$|false$)"
 )
 _HEXISH = re.compile(r"^[0-9a-fA-F\-]+$")
+_UUID_FRAGMENT = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-")
 _EMAIL_ALLOW = ("example.com", "example.org", "example.net", "localhost", "anthropic.com", "github.com")
+# Prose and markdown, never part of a real credential.
+_PROSE_CHARS = "…`"
 
 
 def _valid_generic(v: str) -> bool:
     if _PLACEHOLDER.search(v) or _CODE_REF.match(v) or "(" in v:
+        return False
+    if any(ch in v for ch in _PROSE_CHARS):
         return False
     return shannon_entropy(v) >= 2.5
 
@@ -107,6 +116,9 @@ def _valid_email(v: str) -> bool:
 
 def _valid_entropy(v: str) -> bool:
     if _HEXISH.match(v) or v.startswith(("~", "./")):
+        return False
+    # Identifiers built from UUIDs (tool names, resource ids) are high-entropy but not secrets.
+    if "__" in v or _UUID_FRAGMENT.search(v):
         return False
     if not any(c.isdigit() for c in v) or not any(c.isalpha() for c in v):
         return False

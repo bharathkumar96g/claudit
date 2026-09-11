@@ -35,6 +35,9 @@ NEGATIVE = [
     "/Users/demo/projects/claudit/src/claudit/detect.py",
     "order 2024-000123 total 1234.56",
     "ThisIsAVeryLongCamelCaseIdentifierWithoutDigits",
+    "mcp__6f616b42-0ed8-571e-823f-ee4aca6b7ce9__read_me",
+    "so `ANTHROPIC_API_KEY=sk-ant-…` is one finding, not three",
+    "ANTHROPIC_API_KEY=sk-ant-…",
 ]
 
 
@@ -69,6 +72,13 @@ def test_preview_never_reveals_value():
     assert m.preview != secret and len(m.preview) < len(secret)
     assert mask("short", "generic_secret") == "*****"
     assert len(m.fingerprint) == 64
+
+
+def test_private_key_preview_is_header_only_even_with_escaped_newlines():
+    header = "-----BEGIN RSA " + "PRIVATE KEY-----"
+    escaped = header + "\\nMIIEowIBAAKCAQEA\\n-----END RSA " + "PRIVATE KEY-----"
+    assert mask(escaped, "private_key") == header + "…"
+    assert mask(header + "\nMIIEow\n-----END RSA " + "PRIVATE KEY-----", "private_key") == header + "…"
 
 
 def test_luhn():
