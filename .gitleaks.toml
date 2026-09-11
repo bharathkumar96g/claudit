@@ -1,0 +1,12 @@
+title = "claudit"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated synthetic transcripts contain planted fake secrets by design"
+paths = [
+  '''^data/''',
+  '''^reports/''',
+  '''^outputs/''',
+]

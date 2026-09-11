@@ -1,0 +1,25 @@
+# Real data never enters the repo
+data/
+reports/
+outputs/
+*.duckdb
+*.duckdb.wal
+*.jsonl
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

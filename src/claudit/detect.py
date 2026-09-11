@@ -1,0 +1,219 @@
+"""Deterministic secret and PII detectors.
+
+A raw matched value exists only inside a Match object in memory. Everything
+persisted is derived from it: a SHA-256 fingerprint and a masked preview.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+
+DETECTOR_VERSION = 1
+
+SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    counts: dict[str, int] = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum(c / n * math.log2(c / n) for c in counts.values())
+
+
+def luhn_ok(digits: str) -> bool:
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        d = int(ch)
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def mask(value: str, category: str) -> str:
+    if category == "private_key":
+        return value.splitlines()[0][:40] + "…"
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}…{value[-2:]}"
+
+
+@dataclass(frozen=True)
+class Match:
+    category: str
+    severity: str
+    start: int
+    end: int
+    value: str
+
+    @property
+    def fingerprint(self) -> str:
+        return hashlib.sha256(self.value.encode("utf-8")).hexdigest()
+
+    @property
+    def preview(self) -> str:
+        return mask(self.value, self.category)
+
+
+@dataclass(frozen=True)
+class Rule:
+    category: str
+    severity: str
+    pattern: re.Pattern[str]
+    priority: int
+    group: int = 0
+    validate: Callable[[str], bool] | None = None
+
+
+_PLACEHOLDER = re.compile(
+    r"(?i)(your[_\-]?|example|changeme|change_me|placeholder|redacted|dummy|sample|<[^>]*>|x{4,}|\*{3,}|\.{3,})"
+)
+_CODE_REF = re.compile(
+    r"^(?:\$|\{|os\.|process\.|env\b|ENV\b|getenv|config\.|settings\.|self\.|this\.|None$|null$|true$|false$)"
+)
+_HEXISH = re.compile(r"^[0-9a-fA-F\-]+$")
+_EMAIL_ALLOW = ("example.com", "example.org", "example.net", "localhost", "anthropic.com", "github.com")
+
+
+def _valid_generic(v: str) -> bool:
+    if _PLACEHOLDER.search(v) or _CODE_REF.match(v) or "(" in v:
+        return False
+    return shannon_entropy(v) >= 2.5
+
+
+def _valid_card(v: str) -> bool:
+    digits = re.sub(r"[ \-]", "", v)
+    if not digits.isdigit():
+        return False
+    if v == digits and len(digits) not in (15, 16):
+        return False
+    if not 13 <= len(digits) <= 19 or digits[0] not in "23456":
+        return False
+    return luhn_ok(digits)
+
+
+def _valid_email(v: str) -> bool:
+    return not v.lower().rsplit("@", 1)[1].endswith(_EMAIL_ALLOW)
+
+
+def _valid_entropy(v: str) -> bool:
+    if _HEXISH.match(v) or v.startswith(("~", "./")):
+        return False
+    if not any(c.isdigit() for c in v) or not any(c.isalpha() for c in v):
+        return False
+    return shannon_entropy(v) >= 4.0
+
+
+# Higher priority wins when spans overlap, so specific rules beat generic ones.
+RULES: list[Rule] = [
+    Rule(
+        "private_key",
+        "critical",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"
+            r"(?:[\s\S]{0,8000}?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----)?"
+        ),
+        100,
+    ),
+    Rule(
+        "connection_string",
+        "critical",
+        re.compile(
+            r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?|mssql)://[^\s'\"@/]+:[^\s'\"@]+@[^\s'\"]+"
+        ),
+        95,
+    ),
+    Rule(
+        "aws_secret_access_key",
+        "critical",
+        re.compile(
+            r"(?i)aws[_\-]?secret[_\-]?(?:access[_\-]?)?key['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])"
+        ),
+        92,
+        group=1,
+    ),
+    Rule("aws_access_key_id", "high", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), 90),
+    Rule("anthropic_api_key", "high", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), 90),
+    Rule("openai_api_key", "high", re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"), 88),
+    Rule("github_token", "high", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})"), 90),
+    Rule("slack_token", "high", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), 90),
+    Rule("google_api_key", "high", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), 90),
+    Rule("stripe_key", "high", re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), 90),
+    Rule("jwt", "high", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), 80),
+    Rule("ssn", "high", re.compile(r"(?<![\d\-])\d{3}-\d{2}-\d{4}(?![\d\-])"), 70),
+    Rule("credit_card", "high", re.compile(r"(?<!\d)(?:\d[ \-]?){12,18}\d(?!\d)"), 60, validate=_valid_card),
+    Rule(
+        "generic_secret",
+        "medium",
+        re.compile(
+            r"(?i)\b[A-Za-z0-9_.\-]*(?:password|passwd|pwd|secret|token|api[_\-]?key|access[_\-]?key)"
+            r"['\"]?\s*[:=]\s*['\"]?([^\s'\"]{8,})"
+        ),
+        50,
+        group=1,
+        validate=_valid_generic,
+    ),
+    Rule(
+        "email",
+        "low",
+        re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
+        30,
+        validate=_valid_email,
+    ),
+    Rule(
+        "phone",
+        "low",
+        re.compile(r"(?<![\d\-])(?:\+?1[ .\-])?\(?\d{3}\)?[ .\-]\d{3}[ .\-]\d{4}(?![\d\-])"),
+        20,
+    ),
+    Rule(
+        "high_entropy_string",
+        "medium",
+        re.compile(r"(?<![A-Za-z0-9+_\-/])[A-Za-z0-9+_\-]{32,128}={0,2}(?![A-Za-z0-9+_\-/=])"),
+        10,
+        validate=_valid_entropy,
+    ),
+]
+
+_TRAILING_PUNCT = ";,)]}"
+
+
+def scan(text: str) -> list[Match]:
+    candidates: list[tuple[int, int, Match]] = []
+    for rule in RULES:
+        for m in rule.pattern.finditer(text):
+            value = m.group(rule.group)
+            if not value:
+                continue
+            value = value.rstrip(_TRAILING_PUNCT)
+            if not value or (rule.validate and not rule.validate(value)):
+                continue
+            start = m.start(rule.group)
+            candidates.append(
+                (rule.priority, start, Match(rule.category, rule.severity, start, start + len(value), value))
+            )
+
+    candidates.sort(key=lambda c: (-c[0], c[1]))
+    accepted: list[Match] = []
+    for _, _, cand in candidates:
+        if any(cand.start < a.end and a.start < cand.end for a in accepted):
+            continue
+        accepted.append(cand)
+    accepted.sort(key=lambda m: m.start)
+    return accepted
+
+
+def redact(text: str, matches: list[Match]) -> str:
+    out = text
+    for m in sorted(matches, key=lambda m: m.start, reverse=True):
+        out = f"{out[:m.start]}[REDACTED:{m.category}]{out[m.end:]}"
+    return out
