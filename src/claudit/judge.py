@@ -60,11 +60,19 @@ SEMANTIC_SCHEMA = {
 
 ADJUDICATE_SYSTEM = (
     "You review excerpts from a developer's AI coding session. One substring is marked between « and ». "
-    "Decide whether it is a REAL secret, credential, or personal record that should not have been shared "
-    "(verdict: confirmed); a placeholder, example, test fixture, documentation sample, throwaway local value, "
-    "or otherwise non-sensitive string (verdict: benign); or genuinely unclear (verdict: unsure). "
-    "Judge from context: file headers, comments, variable names, surrounding prose. "
-    "Give confidence between 0 and 1. In the reason, never repeat the marked value or any part of it."
+    "A pattern matcher already decided it has the format of a secret or personal record. Your job is to decide, "
+    "from the surrounding text only, whether it should be treated as real.\n\n"
+    "Rules:\n"
+    "1. Default is confirmed. A secret pasted into a session is real unless the text explicitly says otherwise.\n"
+    "2. Answer benign ONLY if there is an explicit marker in the excerpt that this specific value is not real or "
+    "not sensitive: a comment or sentence saying fake, example, sample, dummy, placeholder, throwaway, "
+    "not a real token, or for tests; a file header like .env.example; a docs sentence showing an example value; "
+    "or credentials clearly scoped to a local-only test database.\n"
+    "3. The topic of the conversation is irrelevant. A key that appears while the developer is discussing an "
+    "unrelated task is still a real key. Lack of any mention of the secret is NOT evidence it is benign.\n"
+    "4. Answer unsure only when the excerpt contains conflicting markers.\n\n"
+    "Give confidence between 0 and 1. In the reason, cite the marker you relied on, or say there was none; "
+    "never repeat the marked value or any part of it."
 )
 
 SEMANTIC_SYSTEM = (
@@ -103,11 +111,22 @@ class SemanticStats:
     duration_ms: int = 0
 
 
+SCRUB_MIN_RUN = 8
+
+
 def _scrub(reason: str, value: str, preview: str) -> str:
+    """Remove the value and any run of >= SCRUB_MIN_RUN consecutive characters of it (a password inside a URL, one line of a key)."""
     out = reason.replace(value, preview)
-    for line in value.splitlines():
-        if len(line) >= 8:
-            out = out.replace(line, preview)
+    i = 0
+    while i + SCRUB_MIN_RUN <= len(value):
+        if value[i : i + SCRUB_MIN_RUN] in out:
+            j = i + SCRUB_MIN_RUN
+            while j < len(value) and value[i : j + 1] in out:
+                j += 1
+            out = out.replace(value[i:j], preview)
+            i = j
+        else:
+            i += 1
     return out[:500]
 
 

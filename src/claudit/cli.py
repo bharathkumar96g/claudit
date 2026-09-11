@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", default=DEFAULT_MODEL)
     s.add_argument("--base-url", default=DEFAULT_BASE_URL)
     s.add_argument("--limit", type=int, default=200, help="max findings to review this run")
+    s.add_argument("--rejudge", action="store_true", help="discard previous verdicts and review everything again")
     s.add_argument("--semantic", action="store_true", help="also scan prompts for sensitive content with no pattern")
     s.add_argument("--semantic-limit", type=int, default=100)
 
@@ -67,6 +68,8 @@ def _cmd_judge(con, args) -> int:
         return 1
     print(f"Ollama {version}, model {args.model}\n")
 
+    if args.rejudge:
+        con.execute("DELETE FROM judgments")
     print("Reviewing flagged findings")
     stats = adjudicate(
         con, client, args.model, args.limit,

@@ -2,8 +2,17 @@ import json
 
 from claudit.db import connect
 from claudit.ingest import ScanStats, scan_dir
-from claudit.judge import adjudicate, semantic_scan
+from claudit.judge import _scrub, adjudicate, semantic_scan
 from claudit.ollama import OllamaClient
+
+
+def test_scrub_removes_fragments_of_the_value_not_just_the_whole():
+    url = "postgresql://app_user:nQrS7RPeMOkIUpkD@db.internal:5432/prod"
+    reason = "a database URL with the password nQrS7RPeMOkIUpkD for user app_user on db.internal"
+    out = _scrub(reason, url, "post…od")
+    assert "nQrS7RPeMOkIUpkD" not in out and "app_user" not in out
+    assert "post…od" in out
+    assert _scrub("no overlap here", url, "post…od") == "no overlap here"
 
 REAL = "Tr0ub4dor&3xyz!!"
 FAKE = "Xy7#pQ2!mN9@kL4$"
