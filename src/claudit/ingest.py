@@ -26,6 +26,7 @@ class ScanStats:
     segments: int = 0
     findings: int = 0
     invalid: int = 0
+    duplicates: int = 0
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -112,15 +113,9 @@ def read_complete_lines(path: Path, offset: int) -> tuple[list[str], int]:
     return lines, offset + len(chunk)
 
 
-def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, stats: ScanStats) -> None:
-    row = con.execute("SELECT byte_offset, line_no FROM checkpoints WHERE file_path = ?", [str(path)]).fetchone()
-    offset, line_no = row if row else (0, 0)
-    lines, new_offset = read_complete_lines(path, offset)
-    if not lines:
-        return
-
-    now = utc_now()
-    ev_rows, seg_rows, fd_rows = [], [], []
+def _parse_records(lines: list[str], start_line: int, stats: ScanStats) -> list[tuple[int, dict]]:
+    out = []
+    line_no = start_line
     for raw in lines:
         line_no += 1
         stats.lines += 1
@@ -135,15 +130,37 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
         if not isinstance(rec, dict):
             stats.invalid += 1
             continue
+        out.append((line_no, rec))
+    return out
 
-        event_id = str(rec.get("uuid") or short_id(str(path), str(line_no)))
+
+def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, stats: ScanStats) -> None:
+    row = con.execute(
+        "SELECT byte_offset, line_no, project FROM checkpoints WHERE file_path = ?", [str(path)]
+    ).fetchone()
+    offset, line_no, known_project = row if row else (0, 0, None)
+    lines, new_offset = read_complete_lines(path, offset)
+    if not lines:
+        return
+
+    records = _parse_records(lines, line_no, stats)
+    line_no += len(lines)
+
+    # One file is one session; the project is the directory the session was launched in.
+    # cwd can change mid-session, so it is resolved once per file and remembered in the checkpoint.
+    file_session = path.stem
+    project = known_project or next((r.get("cwd") for _, r in records if r.get("cwd")), None) or project_hint
+
+    now = utc_now()
+    ev_rows, seg_rows, fd_rows = [], [], []
+    for line_no_of, rec in records:
+        event_id = str(rec.get("uuid") or short_id(str(path), str(line_no_of)))
         msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
-        session_id = rec.get("sessionId") or rec.get("session_id")
-        project = rec.get("cwd") or project_hint
+        session_id = rec.get("sessionId") or rec.get("session_id") or file_session
         ts = _parse_ts(rec.get("timestamp"))
         ev_rows.append(
             (
-                event_id, str(path), line_no, session_id, project,
+                event_id, str(path), line_no_of, session_id, project,
                 str(rec.get("type") or "unknown"), msg.get("role"), ts,
                 rec.get("cwd"), rec.get("gitBranch"), msg.get("model"), now,
             )
@@ -165,8 +182,14 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
                     )
                 )
 
+    def counts() -> tuple[int, int, int]:
+        return con.execute(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM segments), (SELECT count(*) FROM findings)"
+        ).fetchone()
+
     con.begin()
     try:
+        before = counts()
         if ev_rows:
             con.executemany("INSERT OR IGNORE INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", ev_rows)
         if seg_rows:
@@ -175,18 +198,24 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
             con.executemany(
                 "INSERT OR IGNORE INTO findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fd_rows
             )
-        con.execute("INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?)", [str(path), new_offset, line_no, now])
+        con.execute(
+            "INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?,?)", [str(path), new_offset, line_no, now, project]
+        )
+        after = counts()
         con.commit()
     except Exception:
         con.rollback()
         raise
 
     stats.files += 1
-    stats.events += len(ev_rows)
-    stats.segments += len(seg_rows)
-    stats.findings += len(fd_rows)
+    stats.events += after[0] - before[0]
+    stats.segments += after[1] - before[1]
+    stats.findings += after[2] - before[2]
+    stats.duplicates += len(ev_rows) - (after[0] - before[0])
 
 
 def scan_dir(con: duckdb.DuckDBPyConnection, root: Path, stats: ScanStats) -> None:
-    for path in sorted(root.rglob("*.jsonl")):
+    # Oldest file first: a resumed session copies earlier history into its new file, and a message
+    # seen twice is attributed to the session it first appeared in.
+    for path in sorted(root.rglob("*.jsonl"), key=lambda p: (p.stat().st_mtime, str(p))):
         scan_file(con, path, project_hint=path.parent.name, stats=stats)

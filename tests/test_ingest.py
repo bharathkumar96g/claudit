@@ -42,6 +42,31 @@ def test_tool_input_keeps_real_newlines_so_multiline_secrets_match_exactly():
     assert "MIIEow" not in by_cat["private_key"].preview and len(by_cat["private_key"].preview) <= 41
 
 
+def test_one_file_is_one_session_and_one_project_even_when_cwd_moves(tmp_path):
+    con = connect(tmp_path / "t.duckdb")
+    d = tmp_path / "-Users-me-work"
+    d.mkdir()
+    f = d / "abc-123.jsonl"
+    recs = [
+        {"type": "system", "subtype": "init"},                                              # no uuid, session, or cwd
+        {"type": "user", "uuid": "u1", "sessionId": "abc-123", "cwd": "/Users/me/work", "message": {"role": "user", "content": "hi"}},
+        {"type": "user", "uuid": "u2", "sessionId": "abc-123", "cwd": "/Users/me/work/sub", "message": {"role": "user", "content": "moved dirs"}},
+    ]
+    f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    scan_dir(con, tmp_path, ScanStats())
+
+    rows = con.execute("SELECT session_id, project, cwd FROM events ORDER BY line_no").fetchall()
+    assert [r[0] for r in rows] == ["abc-123"] * 3
+    assert [r[1] for r in rows] == ["/Users/me/work"] * 3
+    assert [r[2] for r in rows] == [None, "/Users/me/work", "/Users/me/work/sub"]
+
+    with f.open("a") as fh:
+        fh.write(json.dumps({"type": "user", "uuid": "u3", "sessionId": "abc-123", "cwd": "/elsewhere",
+                             "message": {"role": "user", "content": "later"}}) + "\n")
+    scan_dir(con, tmp_path, ScanStats())
+    assert con.execute("SELECT DISTINCT project FROM events").fetchall() == [("/Users/me/work",)]
+
+
 def _count(con, table):
     return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 

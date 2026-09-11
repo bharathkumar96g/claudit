@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.5.5",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
 ]
 
 [project.scripts]
@@ -17,6 +19,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=8",
 ]
 

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claudit</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wordmark">claudit<span class="cursor">_</span></div>
+  <span id="mode-badge" class="chip"></span>
+  <span class="live"><span id="live-dot" class="live-dot"></span><span id="live-text">live</span></span>
+  <div class="meta" id="meta"></div>
+  <div class="actions">
+    <button id="btn-scan" class="btn accent">scan</button>
+    <button id="btn-judge" class="btn">judge</button>
+    <label class="toggle"><input type="checkbox" id="opt-semantic"> semantic</label>
+    <button id="btn-synth" class="btn ghost" hidden>regen demo</button>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="hero-main">
+    <div class="eyebrow">exposure</div>
+    <div class="hero-num" id="hero-num">0</div>
+    <div class="hero-sub" id="hero-sub"></div>
+  </div>
+  <div class="hero-sev">
+    <div class="eyebrow">by severity</div>
+    <div class="sevbar" id="sevbar" role="img"></div>
+    <div class="sevlegend" id="sevlegend"></div>
+  </div>
+  <div class="hero-stats" id="hero-stats"></div>
+</section>
+
+<section class="filters" id="filters">
+  <span class="eyebrow">filter</span>
+  <select id="f-severity"><option value="">severity: all</option></select>
+  <select id="f-category"><option value="">category: all</option></select>
+  <select id="f-source"><option value="">source: all</option></select>
+  <select id="f-project"><option value="">project: all</option></select>
+  <select id="f-verdict"><option value="">verdict: any</option></select>
+  <input id="f-q" type="search" placeholder="search preview / project">
+  <button id="f-clear" class="btn ghost small">clear</button>
+</section>
+
+<main class="layout">
+  <section class="panel feed">
+    <div class="panel-head"><span class="eyebrow">live feed</span><span class="muted mono" id="table-count"></span></div>
+    <div class="feed-head mono"><span>time</span><span>sev</span><span>category</span><span>preview</span><span>source</span><span>project</span><span>verdict</span></div>
+    <div id="feed" class="feed-body"></div>
+  </section>
+
+  <aside class="side">
+    <section class="panel"><div class="panel-head"><span class="eyebrow">by category</span></div><div class="chart" id="c-category"></div></section>
+    <section class="panel"><div class="panel-head"><span class="eyebrow">by source</span><span class="muted">who put it in front of the model</span></div><div class="chart" id="c-source"></div></section>
+    <section class="panel"><div class="panel-head"><span class="eyebrow">per day</span></div><div class="chart" id="c-timeline"></div></section>
+  </aside>
+
+  <section class="panel wide" id="job" hidden>
+    <div class="panel-head"><span class="eyebrow">model judge</span><span id="job-status" class="muted mono"></span></div>
+    <pre id="job-log" class="term"></pre>
+  </section>
+
+  <section class="panel wide" id="semantic-card" hidden>
+    <div class="panel-head"><span class="eyebrow">sensitive content without a pattern</span><span class="muted">model-found</span></div>
+    <div class="table-wrap"><table id="semantic"><thead><tr><th>when</th><th>kind</th><th>sev</th><th>summary</th><th>project</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="panel wide" id="eval-card" hidden>
+    <div class="panel-head"><span class="eyebrow">evaluation against planted secrets</span><span class="muted" id="eval-sub"></span></div>
+    <div class="eval-grid">
+      <div><div class="subhead">detection</div><div class="table-wrap"><table id="eval-detect"><thead><tr><th>category</th><th class="num">tp</th><th class="num">fp</th><th class="num">fn</th><th class="num">precision</th><th class="num">recall</th><th class="num">f1</th></tr></thead><tbody></tbody></table></div></div>
+      <div id="eval-judge-wrap"><div class="subhead">model judgment <span class="muted" id="eval-acc"></span></div><div class="table-wrap"><table id="eval-judge"><thead><tr><th>expected</th><th class="num">confirmed</th><th class="num">benign</th><th class="num">unsure</th><th class="num">unavailable</th><th class="num">not judged</th></tr></thead><tbody></tbody></table></div></div>
+    </div>
+  </section>
+
+  <footer class="privacy wide">
+    <span class="eyebrow">privacy</span>
+    nothing on this screen is a secret · detection runs before storage · findings hold a sha-256 fingerprint and a masked preview · model layer is local ollama · server binds to localhost and has no endpoint for raw values
+  </footer>
+</main>
+
+<div id="tooltip" class="tooltip" hidden></div>
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

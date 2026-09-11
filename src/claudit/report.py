@@ -7,6 +7,7 @@ from pathlib import Path
 import duckdb
 
 SEV_ORDER = "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
+VERDICT_COLUMNS = ("confirmed", "benign", "unsure", "unavailable", "not judged")
 
 
 def _table(headers: list[str], rows: list[tuple]) -> str:
@@ -102,35 +103,8 @@ def _prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     return p, r, f1
 
 
-def _judge_accuracy(con: duckdb.DuckDBPyConnection, plants: list[dict], sessions: set[str], tp_keys: set[tuple]) -> str | None:
-    verdict_by_key: dict[tuple, str] = {}
-    for sid, cat, fp, verdict in con.execute(
-        "SELECT f.session_id, f.category, f.fingerprint, j.verdict FROM findings f JOIN judgments j ON j.finding_id = f.finding_id"
-    ).fetchall():
-        if sid in sessions:
-            verdict_by_key[(sid, cat, fp)] = verdict
-    if not verdict_by_key:
-        return None
-
-    confusion: Counter = Counter()
-    for p in plants:
-        key = (p["session_id"], p["category"], p["fingerprint"])
-        if key in tp_keys:
-            confusion[(p.get("expected_verdict", "confirmed"), verdict_by_key.get(key, "not judged"))] += 1
-
-    actuals = ["confirmed", "benign", "unsure", "unavailable", "not judged"]
-    rows = [(exp, *[confusion[(exp, a)] for a in actuals]) for exp in ("confirmed", "benign")]
-    judged = sum(v for (e, a), v in confusion.items() if a not in ("not judged", "unavailable"))
-    correct = confusion[("confirmed", "confirmed")] + confusion[("benign", "benign")]
-    acc = f"{correct / judged:.2f}" if judged else "n/a"
-    return (
-        "\nModel judgment accuracy on planted secrets (rows: expected, columns: model verdict)\n"
-        + _table(["expected", *actuals], rows)
-        + f"\naccuracy {acc} over {judged} judged"
-    )
-
-
-def evaluate(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> str:
+def evaluate_data(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> dict:
+    """Detection precision/recall and model-judgment accuracy against the synthetic labels, as plain data."""
     manifest = json.loads((eval_dir / "labels.json").read_text())
     sessions = set(manifest["sessions"])
     plants = manifest["plants"]
@@ -151,32 +125,78 @@ def evaluate(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> str:
             fps.append(r)
     fns = [p for p in plants if (p["session_id"], p["category"], p["fingerprint"]) not in tp_keys]
 
-    categories = sorted({p["category"] for p in plants} | {r[1] for r in fps})
-    table_rows = []
-    for cat in categories:
-        tp = sum(1 for k in tp_keys if k[1] == cat)
-        fp = sum(1 for r in fps if r[1] == cat)
-        fn = sum(1 for p in fns if p["category"] == cat)
+    def row(cat: str, tp: int, fp: int, fn: int) -> dict:
         p, r, f1 = _prf(tp, fp, fn)
-        table_rows.append((cat, tp, fp, fn, f"{p:.2f}", f"{r:.2f}", f"{f1:.2f}"))
-    tp, fp, fn = len(tp_keys), len(fps), len(fns)
-    p, r, f1 = _prf(tp, fp, fn)
-    table_rows.append(("ALL", tp, fp, fn, f"{p:.2f}", f"{r:.2f}", f"{f1:.2f}"))
+        return {"category": cat, "tp": tp, "fp": fp, "fn": fn, "precision": p, "recall": r, "f1": f1}
 
-    parts = [
-        f"Evaluation against {len(plants)} planted secrets in {len(sessions)} synthetic sessions",
-        _table(["category", "tp", "fp", "fn", "precision", "recall", "f1"], table_rows),
+    categories = sorted({p["category"] for p in plants} | {r[1] for r in fps})
+    per_category = [
+        row(cat, sum(1 for k in tp_keys if k[1] == cat), sum(1 for r in fps if r[1] == cat),
+            sum(1 for p in fns if p["category"] == cat))
+        for cat in categories
     ]
-    if fps:
+    overall = row("ALL", len(tp_keys), len(fps), len(fns))
+
+    judge = None
+    verdict_by_key: dict[tuple, str] = {}
+    for sid, cat, fp, verdict in con.execute(
+        "SELECT f.session_id, f.category, f.fingerprint, j.verdict FROM findings f JOIN judgments j ON j.finding_id = f.finding_id"
+    ).fetchall():
+        if sid in sessions:
+            verdict_by_key[(sid, cat, fp)] = verdict
+    if verdict_by_key:
+        confusion: Counter = Counter()
+        for p in plants:
+            key = (p["session_id"], p["category"], p["fingerprint"])
+            if key in tp_keys:
+                confusion[(p.get("expected_verdict", "confirmed"), verdict_by_key.get(key, "not judged"))] += 1
+        judged = sum(v for (e, a), v in confusion.items() if a not in ("not judged", "unavailable"))
+        correct = confusion[("confirmed", "confirmed")] + confusion[("benign", "benign")]
+        judge = {
+            "rows": [{"expected": e, **{a: confusion[(e, a)] for a in VERDICT_COLUMNS}} for e in ("confirmed", "benign")],
+            "judged": judged,
+            "accuracy": correct / judged if judged else None,
+        }
+
+    return {
+        "sessions": len(sessions),
+        "plants": len(plants),
+        "per_category": per_category,
+        "overall": overall,
+        "false_positives": [{"category": r[1], "preview": r[3], "source": r[4], "project": r[5]} for r in fps],
+        "missed": [
+            {"category": p["category"], "preview": p["preview"], "source": p["source"],
+             "location": f"{Path(p['file']).name}:{p['line_no']}"}
+            for p in fns
+        ],
+        "judge": judge,
+    }
+
+
+def evaluate(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> str:
+    d = evaluate_data(con, eval_dir)
+    fmt = lambda r: (r["category"], r["tp"], r["fp"], r["fn"], f"{r['precision']:.2f}", f"{r['recall']:.2f}", f"{r['f1']:.2f}")  # noqa: E731
+    parts = [
+        f"Evaluation against {d['plants']} planted secrets in {d['sessions']} synthetic sessions",
+        _table(["category", "tp", "fp", "fn", "precision", "recall", "f1"],
+               [fmt(r) for r in d["per_category"]] + [fmt(d["overall"])]),
+    ]
+    if d["false_positives"]:
         parts.append("\nFalse positives\n" + _table(
-            ["category", "preview", "source", "project"], [(r[1], r[3], r[4], r[5]) for r in fps]
+            ["category", "preview", "source", "project"],
+            [(r["category"], r["preview"], r["source"], r["project"]) for r in d["false_positives"]],
         ))
-    if fns:
+    if d["missed"]:
         parts.append("\nMissed (false negatives)\n" + _table(
             ["category", "preview", "source", "file:line"],
-            [(p["category"], p["preview"], p["source"], f"{Path(p['file']).name}:{p['line_no']}") for p in fns],
+            [(r["category"], r["preview"], r["source"], r["location"]) for r in d["missed"]],
         ))
-    judge_part = _judge_accuracy(con, plants, sessions, tp_keys)
-    if judge_part:
-        parts.append(judge_part)
+    if d["judge"]:
+        j = d["judge"]
+        acc = f"{j['accuracy']:.2f}" if j["accuracy"] is not None else "n/a"
+        parts.append(
+            "\nModel judgment accuracy on planted secrets (rows: expected, columns: model verdict)\n"
+            + _table(["expected", *VERDICT_COLUMNS], [(r["expected"], *[r[a] for a in VERDICT_COLUMNS]) for r in j["rows"]])
+            + f"\naccuracy {acc} over {j['judged']} judged"
+        )
     return "\n".join(parts)

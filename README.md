@@ -36,6 +36,17 @@ uv run claudit findings   # ids, for `claudit reveal <id>`
 
 Set `CLAUDIT_TRANSCRIPTS_DIR` / `CLAUDIT_DB_PATH` in `.env` (see `.env.example`) or pass `--db`.
 
+## Web UI
+
+```bash
+uv run claudit serve --demo                       # synthetic data, http://127.0.0.1:8765
+uv run claudit --db data/real.duckdb serve       # your transcripts
+```
+
+A local, always-dark security-console dashboard over the same DuckDB file: an exposure hero with a segmented severity bar, findings by category / source and a per-day timeline, one filter row that scopes everything below it, a live feed of findings with the model's verdict and reason per row, the evaluation panel, and the model-found semantic findings. No build step, no external dependencies. **Scan now** ingests whatever's new and re-renders; **Run model judge** starts a background job and the verdict column fills in as each finding is reviewed. In demo mode, **Regenerate demo data** rebuilds the synthetic set and rescans.
+
+The server binds to localhost, serves masked previews only, and has no endpoint for raw values — `claudit reveal` stays a CLI-only, on-demand read of the source transcript.
+
 ## Layer 1: deterministic detection
 
 Rules tuned for precision:
@@ -67,7 +78,8 @@ Cheap deterministic filter first, model only where judgment is needed; structure
 - One row per JSONL line in `events`; one row per text chunk the model saw or produced in `segments`; one row per hit in `findings`; model verdicts in `judgments` and `semantic_findings`. DuckDB, single file.
 - **Checkpointed by byte offset per file.** Reruns process only appended lines. A trailing partial line (Claude Code mid-write) is left for the next run.
 - Inserts are idempotent on content-derived ids; each file commits in one transaction, so a crash mid-file replays cleanly.
-- Events are keyed by the transcript's message `uuid`. A resumed Claude Code session copies earlier history into its new file, so the same message can appear in several files; it's counted once.
+- **One file is one session.** Lines with no `sessionId` (session start, snapshots) take the session from the filename. The project is the directory the session was launched in — resolved once per file from the first `cwd` and remembered in the checkpoint, so a session that `cd`s around stays one project; per-event `cwd` is kept separately.
+- Events are keyed by the transcript's message `uuid`. A resumed Claude Code session copies earlier history into its new file, so the same message can appear in several files; files are scanned oldest-first and a message is counted once, in the session it first appeared in. The scan reports these as "already seen".
 
 ## Evaluation
 
@@ -82,9 +94,9 @@ Current numbers on the default synthetic set (24 sessions, 31 plants, 4 benign-i
 |---|---|---|---|
 | v1 — format-focused | 27/27 | 1/4 | 0.90 |
 | v2 — context-focused | 15/27 | 4/4 | 0.61 |
-| v3 — default real, benign only on an explicit marker | not yet measured | | |
+| v3 — default real, benign only on an explicit marker (current) | 24/27 (+2 unsure) | 2/4 | 0.84 |
 
-The two prompts fail in opposite directions: v1 rubber-stamps the regex, v2 treats "the conversation is about something else" as evidence the secret is fake. A 7B model follows whichever way the prompt leans, so the prompt has to state the default explicitly. Next experiments: v3, and the same eval on a larger model.
+v1 rubber-stamps the regex; v2 treats "the conversation is about something else" as evidence the secret is fake and dismisses 12 real ones. v3 states the default explicitly and lands between them: one real secret dismissed, two flagged unsure, half the benign contexts recognized. A 7B model follows whichever way the prompt leans, so the remaining gap is a model-size question as much as a prompt one — the same eval on a larger model is the next experiment.
 
 The eval has already paid for itself: it caught a bug where JSON-escaping tool inputs broke multi-line matches *and* leaked a full private key into the preview column, and a second one where a model's reason repeated the password portion of a connection string.
 
@@ -108,6 +120,8 @@ src/claudit/
   reveal.py   re-read raw text from source transcripts, hash-verified
   synth.py    synthetic transcript + label generator
   report.py   summary, precision/recall, judgment accuracy
+  server.py   FastAPI app: summary/findings/scan/judge endpoints
+  web/        dashboard (no build step, no external dependencies)
   db.py       schema
   cli.py
 tests/        includes a fake Ollama server (conftest.py)

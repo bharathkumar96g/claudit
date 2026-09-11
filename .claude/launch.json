@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "claudit-demo",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "claudit", "serve", "--demo", "--port", "8765"],
+      "port": 8765
+    },
+    {
+      "name": "claudit-real",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "claudit", "--db", "data/real.duckdb", "serve", "--port", "8766"],
+      "port": 8766
+    }
+  ]
+}

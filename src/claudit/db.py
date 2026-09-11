@@ -9,8 +9,10 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     file_path   VARCHAR PRIMARY KEY,
     byte_offset BIGINT NOT NULL,
     line_no     INTEGER NOT NULL,
-    updated_at  TIMESTAMP NOT NULL
+    updated_at  TIMESTAMP NOT NULL,
+    project     VARCHAR
 );
+ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS project VARCHAR;
 
 CREATE TABLE IF NOT EXISTS events (
     event_id    VARCHAR PRIMARY KEY,

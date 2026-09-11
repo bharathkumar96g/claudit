@@ -50,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("reveal", help="print a finding's raw value from the source transcript (local only)")
     s.add_argument("finding_id")
 
+    s = sub.add_parser("serve", help="run the local web UI (binds to localhost)")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--dir", help="transcripts dir to scan from the UI (default: CLAUDIT_TRANSCRIPTS_DIR)")
+    s.add_argument("--eval", metavar="DIR", help="synthetic dir with labels.json; shows the evaluation panel")
+    s.add_argument("--demo", action="store_true", help="demo mode: scan the synthetic dir and allow regenerating it")
+    s.add_argument("--model", default=DEFAULT_MODEL)
+    s.add_argument("--base-url", default=DEFAULT_BASE_URL)
+
     sub.add_parser("reset", help="delete all ingested data and checkpoints")
     return p
 
@@ -110,6 +119,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"labels: {Path(args.out) / 'labels.json'}")
         return 0
 
+    if args.cmd == "serve":
+        from .server import create_app, serve
+
+        eval_dir = Path(args.eval).expanduser() if args.eval else (Path("data/synthetic") if args.demo else None)
+        transcripts = Path(args.dir).expanduser() if args.dir else (eval_dir if args.demo else cfg.transcripts_dir)
+        app = create_app(db_path, transcripts, eval_dir, args.base_url, args.model, demo=args.demo)
+        print(f"claudit UI at http://{args.host}:{args.port}  (db {db_path}, scanning {transcripts})")
+        serve(app, args.host, args.port)
+        return 0
+
     con = connect(db_path)
     if args.cmd == "reset":
         truncate_all(con)
@@ -129,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             f"scanned {root}\n"
             f"files {stats.files}   new lines {stats.lines}   events {stats.events}   "
             f"segments {stats.segments}   findings {stats.findings}   invalid lines {stats.invalid}"
+            + (f"   already seen {stats.duplicates}" if stats.duplicates else "")
         )
         if stats.lines == 0:
             print("nothing new since last scan")
