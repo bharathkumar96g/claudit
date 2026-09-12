@@ -3,7 +3,7 @@ import json
 import pytest
 
 from claudit.judge import ADJUDICATE_SCHEMA
-from claudit.ollama import OllamaClient, OllamaError, OllamaUnavailable
+from claudit.ollama import OllamaClient, OllamaError, OllamaUnavailableError
 
 
 def test_client_roundtrip(fake_ollama):
@@ -23,7 +23,7 @@ def test_client_roundtrip(fake_ollama):
 
 
 def test_unreachable_server_gives_clear_error():
-    with pytest.raises(OllamaUnavailable, match="cannot reach Ollama"):
+    with pytest.raises(OllamaUnavailableError, match="cannot reach Ollama"):
         OllamaClient("http://127.0.0.1:9", timeout=2).version()
 
 

@@ -4,8 +4,10 @@ from pathlib import Path
 
 import duckdb
 
+from .util import one
+
 # Everything in the database is derived from the transcripts, so a schema change simply rebuilds it.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3  # 3: semantic findings carry piece offsets
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -87,6 +89,7 @@ CREATE TABLE IF NOT EXISTS semantic_scans (
     segment_id     VARCHAR PRIMARY KEY,
     model          VARCHAR NOT NULL,
     prompt_version INTEGER NOT NULL,
+    n_pieces       INTEGER NOT NULL,
     n_findings     INTEGER NOT NULL,
     duration_ms    INTEGER,
     scanned_at     TIMESTAMP NOT NULL
@@ -111,6 +114,9 @@ CREATE TABLE IF NOT EXISTS semantic_findings (
     severity   VARCHAR NOT NULL,
     summary    VARCHAR NOT NULL,
     model      VARCHAR NOT NULL,
+    piece      INTEGER NOT NULL,
+    start_off  INTEGER NOT NULL,
+    end_off    INTEGER NOT NULL,
     ts         TIMESTAMP,
     found_at   TIMESTAMP NOT NULL
 );
@@ -128,9 +134,7 @@ def _run_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def _stored_version(con: duckdb.DuckDBPyConnection) -> int | None:
-    has_meta = con.execute(
-        "SELECT count(*) FROM information_schema.tables WHERE table_name = 'meta'"
-    ).fetchone()[0]
+    has_meta = one(con, "SELECT count(*) FROM information_schema.tables WHERE table_name = 'meta'")[0]
     if not has_meta:
         return None
     row = con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
@@ -140,7 +144,7 @@ def _stored_version(con: duckdb.DuckDBPyConnection) -> int | None:
 def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
-    existing = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main'").fetchone()[0]
+    existing = one(con, "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main'")[0]
     if existing and _stored_version(con) != SCHEMA_VERSION:
         for table in (*TABLES, "meta"):
             con.execute(f"DROP TABLE IF EXISTS {table}")

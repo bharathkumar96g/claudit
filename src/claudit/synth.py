@@ -12,7 +12,7 @@ import random
 import string
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .detect import luhn_ok, mask
@@ -69,6 +69,26 @@ DECOYS = [
 ]
 
 PII = {"ssn", "credit_card", "email", "phone"}
+
+# Sensitive prose with no regex-detectable value in it: what the semantic scan is for. Kinds match judge.SEMANTIC_KINDS.
+SEMANTIC_PLANTS = [
+    ("internal_infrastructure",
+     "The reporting replica lives at db-reporting-2.prod.internal (10.42.7.15) behind the office VPN; failover is "
+     "manual and the runbook is on the internal wiki under platform/oncall."),
+    ("customer_or_employee_data",
+     "Customer Anika Rao (account 88213, Plano TX) disputed two charges last week; her account manager Tomas "
+     "approved a goodwill refund and noted she is going through a divorce."),
+    ("financial",
+     "Q3 net revenue came in at 4.2M against a 3.9M plan; gross churn was 6.1 percent and the board deck flags "
+     "the EMEA miss as the reason for pausing hiring."),
+    ("proprietary_code_or_logic",
+     "Fraud score = 0.7 x velocity + 0.3 x device_risk with a 0.82 block threshold; this weighting is unpublished "
+     "and is what beats the vendor rules on chargebacks."),
+    ("legal_or_hr",
+     "HR note: the performance plan for the senior engineer on the platform team ends on the 30th; legal wants "
+     "the severance range kept to the 3 to 5 month band and nothing in writing yet."),
+]
+SEMANTIC_RATE = 0.2  # per turn
 
 CATEGORIES = [
     "anthropic_api_key", "openai_api_key", "aws_access_key_id", "aws_secret_access_key",
@@ -305,6 +325,7 @@ def build_session(
     cwd = f"/Users/demo/projects/{project}"
     lines: list[dict] = []
     labels: list[dict] = []
+    semantic_labels: list[dict] = []
     parent: str | None = None
     ts = start
 
@@ -363,10 +384,16 @@ def build_session(
                 prompt += f"\n\nHere's the relevant {'file' if p.file_name else 'config'}:\n{p.embed}"
         if rng.random() < 0.3:
             prompt += f"\n\nContext: {rng.choice(DECOYS)}"
+        semantic_here = rng.choice(SEMANTIC_PLANTS) if rng.random() < SEMANTIC_RATE else None
+        semantic_in_prompt = semantic_here is not None and rng.random() < 0.5
+        if semantic_here and semantic_in_prompt:
+            prompt += f"\n\nBackground from the ticket: {semantic_here[1]}"
         emit("user", {"role": "user", "content": prompt})
         for p in here:
             if p.source == "user_prompt":
                 label(p)
+        if semantic_here and semantic_in_prompt:
+            semantic_labels.append({"session_id": session_id, "line_no": len(lines), "source": "user_prompt", "kind": semantic_here[0]})
 
         tool_id = "toolu_" + _rs(rng, 24)
         read_plants = [p for p in here if p.source == "tool_result"]
@@ -401,14 +428,20 @@ def build_session(
             result = content
             if rng.random() < 0.3:
                 result += f"\n# last deploy: {rng.choice(DECOYS)}\n"
+            if semantic_here and not semantic_in_prompt:
+                result += f"\n# notes\n# {semantic_here[1]}\n"
         emit("user", {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": result}]},
              toolUseResult={"type": "text", "file": {"filePath": f"{cwd}/{name}"}})
         for p in read_plants[:1]:
             label(p)
+        if semantic_here and not semantic_in_prompt and not write_plants:
+            semantic_labels.append({"session_id": session_id, "line_no": len(lines), "source": "tool_result", "kind": semantic_here[0]})
 
         emit("assistant", {"role": "assistant", "model": "claude-sonnet-5",
                            "content": [{"type": "text", "text": rng.choice(ASSISTANT_TEXT)}]})
 
+    for s in semantic_labels:
+        labels.append({**s, "semantic": True})
     return lines, labels
 
 
@@ -425,7 +458,7 @@ def generate(out: Path, n_sessions: int, seed: int, benign_share: float = BENIGN
             d.rmdir()
     manifest: dict = {
         "seed": seed,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "sessions": [],
         "plants": [],
     }
@@ -441,7 +474,7 @@ def generate(out: Path, n_sessions: int, seed: int, benign_share: float = BENIGN
     pool += [(rng.choice(BENIGN_CAPABLE), "seen" if i % 2 == 0 else "heldout") for i in range(n_benign)]
     rng.shuffle(pool)
 
-    base = datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc)
+    base = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
     for i, n in enumerate(counts):
         project = rng.choice(PROJECTS)
         session_id = str(uuid.UUID(int=rng.getrandbits(128), version=4))
@@ -459,7 +492,8 @@ def generate(out: Path, n_sessions: int, seed: int, benign_share: float = BENIGN
         for lab in labels:
             lab.update(file=str(path), project=cwd)
         manifest["sessions"].append(session_id)
-        manifest["plants"].extend(labels)
+        manifest["plants"].extend(lab for lab in labels if not lab.get("semantic"))
+        manifest.setdefault("semantic_plants", []).extend(lab for lab in labels if lab.get("semantic"))
 
     (out / "labels.json").write_text(json.dumps(manifest, indent=2))
     return manifest

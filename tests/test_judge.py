@@ -127,6 +127,31 @@ def test_semantic_scan_reads_redacted_text_from_source_and_scrubs_summaries(tmp_
     assert again.scanned == 0 and len(server.requests) == 1
 
 
+def test_semantic_scan_chunks_long_tool_results_and_records_piece_offsets(tmp_path, fake_ollama):
+    url, server = fake_ollama
+    filler = "\n".join(f"row {i:04d}: nothing sensitive here" for i in range(120))  # ~4 KB -> 2 pieces
+    text = filler + "\nTicket: the customer disputed the charge and asked for a callback.\n"
+    con = _setup(tmp_path, [_tool_result("u1", text, "/p/support/ticket.txt")])
+
+    stats = semantic_scan(con, OllamaClient(url), "qwen2.5:7b")
+    assert stats.scanned == 1 and stats.pieces == 2 and stats.findings == 1
+    assert len(server.requests) == 2
+    assert "(part 1 of 2)" in server.requests[0]["messages"][-1]["content"]
+
+    piece, start, end, kind = con.execute("SELECT piece, start_off, end_off, kind FROM semantic_findings").fetchone()
+    assert piece == 1 and kind == "customer_or_employee_data"
+    assert "customer" in text[start:end] and "customer" not in text[:start]
+    assert con.execute("SELECT n_pieces FROM semantic_scans").fetchone()[0] == 2
+
+
+def test_semantic_credentials_findings_are_dropped_where_rules_already_redacted_one():
+    from claudit.judge import _filter_semantic
+
+    found = [("credentials", "high", "a token is hardcoded"), ("financial", "high", "revenue figure")]
+    assert _filter_semantic(found, "GITHUB_TOKEN=[REDACTED:github_token]\nrevenue 4.2M") == [found[1]]
+    assert _filter_semantic(found, "the api token is passed in the header value") == found  # no marker: keep
+
+
 def test_scrub_summary_removes_identifiers_that_appear_in_the_source():
     src = "ticket for Priya Nair, order ORD-88213-XK, mail priya.nair@northwind-freight.com, ref 2026091100042"
     out = _scrub_summary("Customer Priya Nair (order ORD-88213-XK, priya.nair@northwind-freight.com, ref 2026091100042) complained", src)

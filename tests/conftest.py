@@ -8,6 +8,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 FAKE_MODEL = "qwen2.5:7b"
+_DIMS = 64
+
+
+def _fake_embedding(text: str) -> list[float]:
+    vec = [0.0] * _DIMS
+    for word in re.findall(r"[a-z]{3,}", text.lower()):
+        vec[hash(word) % _DIMS] += 1.0
+    norm = sum(x * x for x in vec) ** 0.5 or 1.0
+    return [x / norm for x in vec]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -33,6 +42,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append(body)
+        if self.path == "/api/embed":
+            # Deterministic bag-of-words vectors: texts sharing words get high cosine similarity.
+            inputs = body["input"] if isinstance(body["input"], list) else [body["input"]]
+            self._json({"model": body["model"], "embeddings": [_fake_embedding(t) for t in inputs], "prompt_eval_count": 1})
+            return
         if self.path != "/api/chat":
             self._json({"error": "not found"}, 404)
             return

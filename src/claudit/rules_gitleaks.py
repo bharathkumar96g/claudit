@@ -45,6 +45,16 @@ def _severity(rule_id: str) -> str:
     return "high"
 
 
+def _match_validator(match_res: list[re.Pattern[str]]) -> Callable[[re.Match[str]], bool] | None:
+    if not match_res:
+        return None
+
+    def validate(m: re.Match[str]) -> bool:
+        return not any(p.search(m.group(0)) for p in match_res)
+
+    return validate
+
+
 def _validator(
     entropy: float | None, allow_res: list[re.Pattern[str]], stopwords: list[str]
 ) -> Callable[[str], bool] | None:
@@ -104,7 +114,7 @@ def load_gitleaks_rules(path: Path = RULES_PATH) -> tuple[list[Rule], list[str]]
                 validate=_validator(r.get("entropy"), allow_res, stopwords),
                 keywords=tuple(k.lower() for k in r.get("keywords", [])),
                 source="gitleaks",
-                validate_match=(lambda m, _res=match_res: not any(p.search(m.group(0)) for p in _res)) if match_res else None,
+                validate_match=_match_validator(match_res),
             )
         )
     return rules, failed

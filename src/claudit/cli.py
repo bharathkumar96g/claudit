@@ -10,7 +10,7 @@ from .config import load_config
 from .db import connect, truncate_all
 from .ingest import ScanStats, scan_dir
 from .judge import adjudicate, semantic_scan
-from .ollama import DEFAULT_BASE_URL, DEFAULT_MODEL, OllamaClient, OllamaUnavailable
+from .ollama import DEFAULT_BASE_URL, DEFAULT_EMBED_MODEL, DEFAULT_MODEL, OllamaClient, OllamaUnavailableError
 from .report import _table, evaluate, summary
 from .reveal import reveal_finding
 from .synth import generate
@@ -39,7 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--base-url", default=DEFAULT_BASE_URL)
     s.add_argument("--limit", type=int, default=200, help="max findings to review this run")
     s.add_argument("--rejudge", action="store_true", help="discard previous verdicts and review everything again")
-    s.add_argument("--semantic", action="store_true", help="also scan prompts for sensitive content with no pattern")
+    s.add_argument("--rag", action="store_true", help="show the model similar past cases from the example memory")
+    s.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL)
+    s.add_argument("--semantic", action="store_true", help="also scan prompts and files for sensitive content with no pattern")
+    s.add_argument("--semantic-only", action="store_true", help="run only the semantic scan, skip reviewing findings")
     s.add_argument("--semantic-limit", type=int, default=100)
 
     s = sub.add_parser("report", help="print findings summary")
@@ -74,6 +77,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("new_state", nargs="?", choices=["open", "rotated", "dismissed"])
     s.add_argument("--note")
 
+    s = sub.add_parser("memory", help="example memory for retrieval-augmented judging")
+    s.add_argument("action", choices=["build", "add-verdicts", "stats"])
+    s.add_argument("--from", dest="from_dir", default="data/synthetic", help="synthetic dir with labels.json (build)")
+    s.add_argument("--embed-model", default=DEFAULT_EMBED_MODEL)
+    s.add_argument("--base-url", default=DEFAULT_BASE_URL)
+
+    s = sub.add_parser("adversarial", help="prompt-injection robustness check for the judge (needs Ollama)")
+    s.add_argument("--n", type=int, default=24, help="cases; half controls, half injections")
+    s.add_argument("--seed", type=int, default=11)
+    s.add_argument("--model", default=DEFAULT_MODEL)
+    s.add_argument("--base-url", default=DEFAULT_BASE_URL)
+
     s = sub.add_parser("rules", help="list the detection rules")
     s.add_argument("--all", action="store_true", help="list every rule id, not just the counts")
 
@@ -103,7 +118,7 @@ def _cmd_judge(con, args) -> int:
     try:
         version = client.version()
         models = client.models()
-    except OllamaUnavailable as e:
+    except OllamaUnavailableError as e:
         print(e)
         return 1
     if args.model not in models and f"{args.model}:latest" not in models:
@@ -112,20 +127,32 @@ def _cmd_judge(con, args) -> int:
         return 1
     print(f"Ollama {version}, model {args.model}\n")
 
+    retriever = None
+    if args.rag:
+        from . import memory
+
+        def retriever(excerpt: str, category: str, session_id: str | None, fingerprint: str) -> str:
+            return memory.render_examples(
+                memory.retrieve(con, client, args.embed_model, excerpt, category, session_id, fingerprint)
+            )
+
     if args.rejudge:
         con.execute("DELETE FROM judgments")
-    print("Reviewing flagged findings")
-    stats = adjudicate(
-        con, client, args.model, args.limit,
-        on_result=lambda cat, prev, verdict, reason: print(f"  {verdict:11} {cat:22} {prev:20} {reason[:60]}"),
-    )
-    print(
-        f"model-judged {stats.judged}   confirmed-by-rule {stats.routed}   confirmed {stats.confirmed}"
-        f"   benign {stats.benign}   unsure {stats.unsure}   unavailable {stats.unavailable}"
-        f"   tokens in/out {stats.prompt_tokens}/{stats.output_tokens}   {stats.duration_ms / 1000:.1f}s model time"
-    )
+    if not args.semantic_only:
+        print("Reviewing flagged findings" + (" with retrieved examples" if args.rag else ""))
+        stats = adjudicate(
+            con, client, args.model, args.limit,
+            on_result=lambda cat, prev, verdict, reason: print(f"  {verdict:11} {cat:22} {prev:20} {reason[:60]}"),
+            retriever=retriever,
+        )
+        print(
+            f"model-judged {stats.judged}   confirmed-by-rule {stats.routed}   confirmed {stats.confirmed}"
+            f"   benign {stats.benign}   unsure {stats.unsure}   unavailable {stats.unavailable}"
+            + (f"   with examples {stats.with_examples}" if args.rag else "")
+            + f"   tokens in/out {stats.prompt_tokens}/{stats.output_tokens}   {stats.duration_ms / 1000:.1f}s model time"
+        )
 
-    if args.semantic:
+    if args.semantic or args.semantic_only:
         print("\nScanning prompts for sensitive content without a pattern")
         sstats = semantic_scan(
             con, client, args.model, args.semantic_limit,
@@ -139,7 +166,7 @@ def _cmd_judge(con, args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    sys.stdout.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
     args = build_parser().parse_args(argv)
     cfg = load_config()
     db_path = Path(args.db).expanduser() if args.db else cfg.db_path
@@ -157,11 +184,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "rules":
         return _cmd_rules(args)
 
+    if args.cmd == "adversarial":
+        from .adversarial import run
+        from .judge import JUDGE_PROMPT_VERSION
+
+        client = OllamaClient(args.base_url)
+        try:
+            client.version()
+        except OllamaUnavailableError as e:
+            print(e)
+            return 1
+        res = run(client, args.model, args.n, args.seed)
+        print(f"prompt v{JUDGE_PROMPT_VERSION}, model {args.model}, {args.n} cases, {res.instructions_removed} instruction lines removed")
+        print(f"controls  confirmed {res.control_confirmed}/{res.n_control}")
+        print(f"attacks   dismissed (benign) {res.dismissed}/{res.n_attacks}   degraded (unsure) {res.degraded}/{res.n_attacks}"
+              f"   dismissal rate {res.dismissal_rate:.2f}")
+        for verdict, injection, category, reason in res.examples:
+            print(f"  {verdict.upper():9} {category:20} by: {injection[:70]}\n            reason: {reason}")
+        return 0
+
     if args.cmd == "serve":
         from .server import create_app, serve
 
         eval_dir = Path(args.eval).expanduser() if args.eval else (Path("data/synthetic") if args.demo else None)
-        transcripts = Path(args.dir).expanduser() if args.dir else (eval_dir if args.demo else cfg.transcripts_dir)
+        transcripts = Path(args.dir).expanduser() if args.dir else ((eval_dir if args.demo else None) or cfg.transcripts_dir)
         from .server import LOOPBACK_HOSTS
 
         allowed = LOOPBACK_HOSTS if args.host in ("127.0.0.1", "localhost", "::1") else None
@@ -171,6 +217,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     con = connect(db_path)
+
+    if args.cmd == "memory":
+        from . import memory
+
+        if args.action == "stats":
+            mrows = memory.stats(con)
+            print(_table(["origin", "verdict", "examples"], mrows) if mrows else "memory is empty")
+            return 0
+        client = OllamaClient(args.base_url)
+        try:
+            client.version()
+        except OllamaUnavailableError as e:
+            print(e)
+            return 1
+        if args.action == "build":
+            n = memory.build_from_labels(con, client, args.embed_model, Path(args.from_dir).expanduser())
+            print(f"embedded {n} labeled examples from {args.from_dir} (held-out plants excluded)")
+        else:
+            n = memory.add_verdicts(con, client, args.embed_model)
+            print(f"embedded {n} examples from rotated/dismissed secrets")
+        return 0
+
     if args.cmd == "reset":
         truncate_all(con)
         print(f"cleared {db_path}")
@@ -219,18 +287,18 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"{fp[:12]}… marked {args.new_state}")
             return 0
-        rows = list_secrets(con, None if args.state == "all" else args.state, args.limit)
-        if not rows:
+        secrets_rows = list_secrets(con, None if args.state == "all" else args.state, args.limit)
+        if not secrets_rows:
             print(f"no {args.state} secrets")
             return 0
         print(_table(
             ["fingerprint", "sev", "category", "preview", "verdict", "sessions", "first seen", "last seen", "state"],
-            [(r["fingerprint"][:12], r["severity"], r["category"], r["preview"][:24], r["verdict"], r["sessions"],
-              (r["first_seen"] or "")[:10], (r["last_seen"] or "")[:10], r["state"]) for r in rows],
+            [(s["fingerprint"][:12], s["severity"], s["category"], s["preview"][:24], s["verdict"], s["sessions"],
+              (s["first_seen"] or "")[:10], (s["last_seen"] or "")[:10], s["state"]) for s in secrets_rows],
         ))
         print("\nwhat to do (top 5):")
-        for r in rows[:5]:
-            print(f"  {r['fingerprint'][:12]}  {r['category']}: {r['rotation']}")
+        for s in secrets_rows[:5]:
+            print(f"  {s['fingerprint'][:12]}  {s['category']}: {s['rotation']}")
         return 0
 
     if args.cmd == "findings":
@@ -255,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         if result is None:
             print("not found, or the source transcript changed since ingest")
             return 1
-        value, excerpt = result
+        _value, excerpt = result
         print("Raw value re-read from the source transcript. Not stored anywhere.\n")
         print(excerpt)
         return 0

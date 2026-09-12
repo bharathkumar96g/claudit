@@ -42,6 +42,7 @@ Chunking of large tool results for the semantic scan (Phase 5); embeddings.
 | v3 | path only | 25 / 76 | 53/53 | 8/12 | 0/11 | 11 of 15 misses never reached the model |
 | v4 | path + no-path + context | 59 / 76 | 52/53 | 12/12 | 11/11 | **invalid**: v4's example list contained held-out words |
 | v5 | same | 59 / 76 | 52/53 | 12/12 | 8/11 | held-out words removed; decoy rule added |
+| v7 | same | 59 / 76 | 49/53, 0 dismissed | 9/12 | 3/11 (8 unsure) | instruction stripping + prose-only benign capped at unsure |
 
 The v4→v5 drop on held-out (11/11 → 8/11) is the measured cost of contamination: three plants the model
 recognised only because the prompt named their words. v5 is the number of record.

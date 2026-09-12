@@ -70,7 +70,7 @@ def list_secrets(con: duckdb.DuckDBPyConnection, state: str | None = "open", lim
             "sources", "projects", "confirmed", "benign", "unsure", "unjudged", "state", "note", "updated_at"]
     out = []
     for r in rows:
-        d = dict(zip(cols, r))
+        d = dict(zip(cols, r, strict=True))
         for k in ("first_seen", "last_seen", "updated_at"):
             d[k] = d[k].isoformat() if isinstance(d[k], datetime) else None
         d["verdict"] = "confirmed" if d["confirmed"] else "benign" if d["benign"] else "unsure" if d["unsure"] else "unjudged"

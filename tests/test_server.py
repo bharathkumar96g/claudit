@@ -58,7 +58,7 @@ def test_posts_without_the_header_or_from_a_foreign_host_are_refused(tmp_path):
 
 
 def test_judge_job_runs_in_background_and_reports_progress(tmp_path, fake_ollama):
-    url, server = fake_ollama
+    url, _server = fake_ollama
     client, _ = _client(tmp_path, ollama_url=url)
     client.post("/api/scan", headers=POST)
 

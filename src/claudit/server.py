@@ -139,7 +139,7 @@ def create_app(
             try:
                 fp = set_state(con, fingerprint, state, body.get("note"))
             except LookupError as e:
-                raise HTTPException(404, str(e))
+                raise HTTPException(404, str(e)) from e
         return {"fingerprint": fp, "state": state}
 
     @app.post("/api/scan")

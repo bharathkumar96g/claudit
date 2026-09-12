@@ -1,7 +1,5 @@
 import json
 
-import duckdb
-
 from claudit.db import SCHEMA_VERSION, connect
 from claudit.detect import scan
 from claudit.ingest import ScanStats, extract_segments, scan_dir

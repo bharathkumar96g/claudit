@@ -14,6 +14,12 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
+      - name: lint (ruff)
+        run: uv run ruff check src tests
+      - name: types (mypy)
+        run: uv run mypy
+      - name: security lint (bandit)
+        run: uv run bandit -q -c pyproject.toml -r src
       - name: unit tests
         run: uv run pytest -q
       - name: detection eval gate (synthetic set, must stay at F1 = 1.0 with zero false positives)

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 
 from .detect import DETECTOR_VERSION, scan
-from .util import sha256, short_id, utc_now
+from .util import one, sha256, short_id, utc_now
 
 
 @dataclass
@@ -49,7 +49,7 @@ def _parse_ts(value: object) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
     return dt
 
 
@@ -103,7 +103,8 @@ def _result_path(rec: dict) -> str | None:
 def extract_segments(rec: dict) -> list[Segment]:
     """Text chunks the model saw or produced, tagged by who put them there and which file they came from."""
     kind = rec.get("type")
-    msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+    raw_msg = rec.get("message")
+    msg: dict = raw_msg if isinstance(raw_msg, dict) else {}
     content = msg.get("content")
     out: list[Segment] = []
 
@@ -223,7 +224,8 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
     reuse_cache: dict = {}
     for line_no_of, rec in records:
         event_id = str(rec.get("uuid") or short_id(str(path), str(line_no_of)))
-        msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+        raw_msg = rec.get("message")
+        msg: dict = raw_msg if isinstance(raw_msg, dict) else {}
         session_id = rec.get("sessionId") or rec.get("session_id") or file_session
         ts = _parse_ts(rec.get("timestamp"))
         ev_rows.append(
@@ -259,9 +261,8 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
                 )
 
     def counts() -> tuple[int, int, int]:
-        return con.execute(
-            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM segments), (SELECT count(*) FROM findings)"
-        ).fetchone()
+        e, s, f = one(con, "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM segments), (SELECT count(*) FROM findings)")
+        return int(e), int(s), int(f)
 
     con.begin()
     try:

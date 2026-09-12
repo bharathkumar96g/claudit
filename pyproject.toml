@@ -19,9 +19,42 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "bandit>=1.9.4",
     "httpx>=0.28.1",
+    "hypothesis>=6.168.0",
+    "mypy>=2.3.1",
     "pytest>=8",
+    "ruff>=0.16.7",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "N", "SIM", "RUF"]
+# S101 asserts in tests · S311 non-crypto random in synth · E501 long lines · SIM108 ternary style
+# RUF001/003 ellipsis in previews · RUF012 mutable class attrs
+# S608: every SQL string interpolates only module constants (table names, ORDER BY cases, placeholder counts);
+#       all values are bound parameters. Reviewed 2026-09-12.
+ignore = ["S101", "S311", "E501", "SIM108", "RUF001", "RUF003", "RUF012", "S608"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108", "N802", "B011"]  # fixture "passwords", tmp paths, long test names
+"src/claudit/synth.py" = ["S105", "S106"]              # generated fake credentials
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["claudit"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+# B101 asserts · B311 non-crypto random in synth · B608 SQL interpolates module constants only, values are bound
+# B105 flags rotation *instructions* that contain the word "token" or "password"
+skips = ["B101", "B311", "B608", "B105"]

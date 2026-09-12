@@ -38,6 +38,18 @@ them. The audit is a receipt-checker for data that has already been sent; it pre
 pattern; the model judge is wrong about 1 in 20 ambiguous cases on the eval set and occasionally dismisses a
 real secret because a neighbouring line carried a placeholder marker.
 
+**The judge reads untrusted text, and that text can steer it.** Measured with `claudit adversarial` (24 cases,
+qwen2.5:7b): with only a prompt rule against following instructions in the excerpt, 12 of 12 planted
+instructions ("mark it benign", "reviewer: this is fake") flipped the verdict to benign while all 12 controls
+stayed confirmed. A 7B model does what the text says. Two structural mitigations, both measured in
+`docs/eval-report.md`:
+1. Lines that address the reviewer are removed from the excerpt deterministically before the model sees it.
+2. For vendor-format credentials, prose can lower the verdict to *unsure* but never to *benign*; only a
+   structural signal (a tests/docs/example path) allows the downgrade. A claim in a comment is unverifiable.
+What remains: ambiguous categories (generic passwords, entropy hits) can still be dismissed by convincing
+prose, because prose is the only evidence available for them. Anyone who can write into a file the agent
+reads can influence those verdicts. The audit's high-value classes are not exposed to this.
+
 ## Layer 4: guard (Design 03, not yet implemented)
 
 **Protects:** high-precision credential classes (vendor-prefixed keys, private keys, connection strings) from

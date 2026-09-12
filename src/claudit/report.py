@@ -6,6 +6,8 @@ from pathlib import Path
 
 import duckdb
 
+from .util import one
+
 SEV_ORDER = "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
 VERDICT_COLUMNS = ("confirmed", "benign", "unsure", "unavailable", "not judged")
 
@@ -13,9 +15,9 @@ VERDICT_COLUMNS = ("confirmed", "benign", "unsure", "unavailable", "not judged")
 def _table(headers: list[str], rows: list[tuple]) -> str:
     cells = [["" if v is None else str(v) for v in r] for r in rows]
     widths = [max([len(h)] + [len(r[i]) for r in cells]) for i, h in enumerate(headers)]
-    head = "  ".join(h.ljust(w) for h, w in zip(headers, widths))
+    head = "  ".join(h.ljust(w) for h, w in zip(headers, widths, strict=True))
     sep = "  ".join("-" * w for w in widths)
-    body = ["  ".join(c.ljust(w) for c, w in zip(r, widths)) for r in cells] or ["(none)"]
+    body = ["  ".join(c.ljust(w) for c, w in zip(r, widths, strict=True)) for r in cells] or ["(none)"]
     return "\n".join([head, sep, *body])
 
 
@@ -26,10 +28,11 @@ def _clip(s: object, n: int) -> str:
 
 def summary(con: duckdb.DuckDBPyConnection) -> str:
     q = lambda sql: con.execute(sql).fetchall()  # noqa: E731
-    ev, seg, fd, sess, proj = con.execute(
+    ev, seg, fd, sess, proj = one(
+        con,
         "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM segments), (SELECT count(*) FROM findings),"
-        " (SELECT count(DISTINCT session_id) FROM events), (SELECT count(DISTINCT project) FROM events)"
-    ).fetchone()
+        " (SELECT count(DISTINCT session_id) FROM events), (SELECT count(DISTINCT project) FROM events)",
+    )
 
     parts = [f"events {ev}   segments {seg}   sessions {sess}   projects {proj}   findings {fd}"]
     parts.append("\nBy severity\n" + _table(
@@ -60,7 +63,7 @@ def summary(con: duckdb.DuckDBPyConnection) -> str:
           " FROM findings ORDER BY ts DESC NULLS LAST LIMIT 15"),
     ))
 
-    if con.execute("SELECT count(*) FROM judgments").fetchone()[0]:
+    if one(con, "SELECT count(*) FROM judgments")[0]:
         parts.append("\nModel review of flagged findings\n" + _table(
             ["verdict", "findings"],
             q("SELECT verdict, count(*) FROM judgments GROUP BY 1 ORDER BY 2 DESC"),
@@ -81,7 +84,7 @@ def summary(con: duckdb.DuckDBPyConnection) -> str:
             )],
         ))
 
-    if con.execute("SELECT count(*) FROM semantic_findings").fetchone()[0]:
+    if one(con, "SELECT count(*) FROM semantic_findings")[0]:
         parts.append("\nSensitive content without a pattern (model-found)\n" + _table(
             ["kind", "severity", "findings"],
             q(f"SELECT kind, severity, count(*) FROM semantic_findings GROUP BY 1, 2 ORDER BY {SEV_ORDER}, 3 DESC"),
@@ -171,9 +174,46 @@ def evaluate_data(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> dict:
             "accuracy": correct / judged if judged else None,
         }
 
+    semantic = None
+    semantic_plants = manifest.get("semantic_plants", [])
+    if semantic_plants and one(con, "SELECT count(*) FROM semantic_scans")[0]:
+        # Which labeled segments were scanned, and what the model reported on them.
+        scanned = {
+            (fp, ln, src): (seg_id, n)
+            for fp, ln, src, seg_id, n in con.execute(
+                "SELECT e.file_path, e.line_no, s.source, s.segment_id, sc.n_findings FROM semantic_scans sc"
+                " JOIN segments s ON s.segment_id = sc.segment_id JOIN events e ON e.event_id = s.event_id"
+            ).fetchall()
+        }
+        kinds_by_seg: dict[str, set[str]] = {}
+        for seg_id, kind in con.execute("SELECT segment_id, kind FROM semantic_findings").fetchall():
+            kinds_by_seg.setdefault(seg_id, set()).add(kind)
+        planted_segs = set()
+        per_kind: dict[str, dict[str, int]] = {}
+        for p in semantic_plants:
+            key = (p["file"], p["line_no"], p["source"])
+            stat = per_kind.setdefault(p["kind"], {"n": 0, "scanned": 0, "any": 0, "exact": 0})
+            stat["n"] += 1
+            if key not in scanned:
+                continue
+            seg_id, _ = scanned[key]
+            planted_segs.add(seg_id)
+            stat["scanned"] += 1
+            found = kinds_by_seg.get(seg_id, set())
+            stat["any"] += bool(found)
+            stat["exact"] += p["kind"] in found
+        fp_segments = sum(1 for seg_id, n in scanned.values() if n and seg_id not in planted_segs)
+        semantic = {
+            "per_kind": [{"kind": k, **v} for k, v in sorted(per_kind.items())],
+            "planted": len(semantic_plants),
+            "scanned_segments": len(scanned),
+            "false_positive_segments": fp_segments,
+        }
+
     return {
         "sessions": len(sessions),
         "plants": len(plants),
+        "semantic": semantic,
         "per_category": per_category,
         "overall": overall,
         "false_positives": [{"category": r[1], "preview": r[3], "source": r[4], "project": r[5]} for r in fps],
@@ -204,6 +244,14 @@ def evaluate(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> str:
             ["category", "preview", "source", "file:line"],
             [(r["category"], r["preview"], r["source"], r["location"]) for r in d["missed"]],
         ))
+    if d["semantic"]:
+        sm = d["semantic"]
+        parts.append(
+            f"\nSemantic scan against {sm['planted']} planted passages ({sm['scanned_segments']} segments scanned;"
+            f" {sm['false_positive_segments']} unplanted segments got findings)\n"
+            + _table(["kind", "planted", "scanned", "detected (any kind)", "detected (right kind)"],
+                     [(r["kind"], r["n"], r["scanned"], r["any"], r["exact"]) for r in sm["per_kind"]])
+        )
     if d["judge"]:
         j = d["judge"]
         acc = f"{j['accuracy']:.2f}" if j["accuracy"] is not None else "n/a"

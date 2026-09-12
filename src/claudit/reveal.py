@@ -26,12 +26,14 @@ def reveal_segment(con: duckdb.DuckDBPyConnection, segment_id: str) -> str | Non
     if not path.is_file():
         return None
 
+    raw: bytes | None = None
     with path.open("rb") as f:
-        for i, raw in enumerate(f, start=1):
+        for i, line in enumerate(f, start=1):
             if i == line_no:
+                raw = line
                 break
-        else:
-            return None
+    if raw is None:
+        return None
     try:
         rec = json.loads(raw.decode("utf-8", errors="replace"))
     except json.JSONDecodeError:
