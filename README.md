@@ -111,17 +111,15 @@ Current numbers, reproducible with `claudit synth --sessions 60 --seed 7 && clau
 
 **Detection** — 76 plants across 27 categories and every source including `thinking` blocks: 76/76 found, 0 false positives, F1 1.00. On real transcripts (1,817 chunks, unlabeled) the imported rules produced no hits beyond the hand-tuned ones — zero hits, not proven zero errors.
 
-**Judgment** — 76 findings; routing sent 25 to the model (89 s) and confirmed 51 by rule:
+**Judgment** — 76 findings; routing sent 59 to the model (402 s) and confirmed 17 by rule (bare `KEY=value` lines in production-looking files):
 
 | expected | confirmed | benign | n |
 |---|---|---|---|
-| real secret | **53** | 0 | 53 |
-| benign, seen vocabulary | 4 | **8** | 12 |
-| benign, held-out vocabulary | 11 | **0** | 11 |
+| real secret | **52** | 1 | 53 |
+| benign, seen vocabulary | 0 | **12** | 12 |
+| benign, held-out vocabulary | 3 | **8** | 11 |
 
-Read it honestly: no real secret is dismissed; benign recognition works on wording the prompt was written against and **fails completely on wording it wasn't** — and most of that failure is routing, not the model. 8 of the 11 held-out plants were vendor-format keys in paths that don't look like tests or docs, so they were confirmed by rule and the model never saw the "stub value wired into the CI pipeline" comment beside them; 3 more were pasted into prompts, where there is no file path to trigger the model. Of the plants the model actually read, it scored 8/9 on seen vocabulary and 0/3 on held-out.
-
-Earlier prompt iterations (v1 0.90, v2 0.61, v3 0.84 on a 31-plant set) were measured against benign plants written in the prompt's own vocabulary with n=4; those numbers are superseded by the table above and should not be quoted. Next (Phase 1): route on context, not only path; a prompt that describes the concept rather than listing words; the same eval across larger local models.
+Accuracy 0.95. Two failure modes remain, both documented rather than tuned away: the one dismissed real secret sat in a prompt next to a decoy `API_KEY=your_api_key_here` line and the model applied the neighbour's placeholder marker to it; the three missed held-out plants are one wording ("default for the disposable compose stack … every deployed environment overrides it") where the model's written reason says the value isn't live but its verdict says confirmed — a verdict/reason inconsistency typical of a 7B model. These are what the model bench is for; see `docs/eval-report.md` for the full history, including how the previous prompt got to 23/23 on held-out by accidentally including held-out words in its example list, and why that number was thrown out.
 
 The eval has already paid for itself: it caught a bug where JSON-escaping tool inputs broke multi-line matches *and* leaked a full private key into the preview column, and a second one where a model's reason repeated the password portion of a connection string.
 

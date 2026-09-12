@@ -21,7 +21,7 @@ from .ollama import OllamaClient
 from .reveal import redacted_text, redacted_window, reveal_segment
 from .util import sha256, short_id, utc_now
 
-JUDGE_PROMPT_VERSION = 3
+JUDGE_PROMPT_VERSION = 5
 
 VERDICTS = ("confirmed", "benign", "unsure")
 SEMANTIC_KINDS = (
@@ -75,17 +75,23 @@ ADJUDICATE_SYSTEM = (
     "You review excerpts from a developer's AI coding session. One substring is marked between « and ». "
     "A pattern matcher already decided it has the format of a secret or personal record. Your job is to decide, "
     "from the surrounding text and the file path only, whether it should be treated as real.\n\n"
+    "Definitions:\n"
+    "- confirmed: nothing in the excerpt or path says the value is disconnected from a live system. This is the "
+    "default. A secret pasted into a session is real unless the text says otherwise.\n"
+    "- benign: the excerpt or path states, in any wording, that THIS value is not connected to anything real: it was "
+    "invented for illustration or teaching, was not obtained from the provider, is deliberately temporary, or is scoped "
+    "to an environment nothing real depends on. Typical phrasings include fake, example, sample, dummy, placeholder, "
+    "throwaway, 'not a real token', a tests/ or docs/ path, or a .env.example header — but the marker can be expressed "
+    "in any words at all; judge the meaning, not the vocabulary.\n"
+    "- unsure: the excerpt contains markers pointing both ways.\n\n"
     "Rules:\n"
-    "1. Default is confirmed. A secret pasted into a session is real unless the text explicitly says otherwise.\n"
-    "2. Answer benign ONLY if there is an explicit marker in the excerpt or path that this specific value is not "
-    "real or not sensitive: a comment or sentence saying fake, example, sample, dummy, placeholder, throwaway, "
-    "not a real token, or for tests; a file path or header like tests/ or .env.example; a docs sentence showing an "
-    "example value; or credentials clearly scoped to a local-only test database.\n"
-    "3. The topic of the conversation is irrelevant. A key that appears while the developer is discussing an "
-    "unrelated task is still a real key. Lack of any mention of the secret is NOT evidence it is benign.\n"
-    "4. Answer unsure only when the excerpt contains conflicting markers.\n\n"
-    "Other detected values in the excerpt appear as [REDACTED:category]; do not comment on them. "
-    "Give confidence between 0 and 1. In the reason, cite the marker you relied on, or say there was none; "
+    "1. The topic of the conversation is irrelevant. A key that appears while the developer discusses an unrelated "
+    "task is still a real key. Lack of any mention of the secret is NOT evidence it is benign.\n"
+    "2. A marker must be about this value or the file it sits in. A placeholder or comment attached to a "
+    "different variable or line (for example another key that reads your_api_key_here) says nothing about the "
+    "marked value.\n"
+    "3. Other detected values appear as [REDACTED:category]; do not comment on them.\n\n"
+    "Give confidence between 0 and 1. In the reason, quote the marker you relied on, or say there was none; "
     "never repeat the marked value or any part of it."
 )
 
@@ -132,10 +138,24 @@ class SemanticStats:
     duration_ms: int = 0
 
 
-def needs_model(category: str, severity: str, path: str | None) -> bool:
+_COMMENT_MARKER = re.compile(r"(?m)^\s*(?:#|//|/\*|\*|--|<!--|;)|(?<!:)//(?!/)")
+_SENTENCE = re.compile(r"\b[A-Za-z][a-z]{2,}(?: [a-z]{2,}){3,}")  # four or more words in a row: prose, not config
+
+
+def has_context(window: str) -> bool:
+    """A comment or a sentence near the value means there is something for the model to read."""
+    return bool(_COMMENT_MARKER.search(window) or _SENTENCE.search(window))
+
+
+def needs_model(category: str, severity: str, path: str | None, window: str = "") -> bool:
+    """Route on evidence of context. A bare KEY=value line in a production-looking file stays rule-confirmed."""
     if category in AMBIGUOUS or severity in ("medium", "low"):
         return True
-    return bool(path and BENIGN_PATH.search(path))
+    if path is None:
+        return True  # pasted into a prompt or thinking block: unknown context is not evidence of production
+    if BENIGN_PATH.search(path):
+        return True
+    return has_context(window)
 
 
 def _scrub(reason: str, value: str, preview: str) -> str:
@@ -209,15 +229,6 @@ def adjudicate(
 
     stats = JudgeStats()
     for finding_id, segment_id, category, severity, preview, start, end, fingerprint, path in rows:
-        if not needs_model(category, severity, path):
-            reason = "vendor-format credential outside a test, docs, or example path; confirmed by rule, not sent to the model"
-            _store_judgment(con, finding_id, "confirmed", None, reason, "rules", 0, 0, 0)
-            stats.routed += 1
-            stats.confirmed += 1
-            if on_result:
-                on_result(category, preview, "confirmed", "by rule")
-            continue
-
         text = reveal_segment(con, segment_id)
         value = text[start:end] if text is not None else None
         if value is None or sha256(value) != fingerprint:
@@ -229,6 +240,16 @@ def adjudicate(
             continue
 
         excerpt = redacted_window(text, start, end, WINDOW)
+        if not needs_model(category, severity, path, excerpt):
+            reason = ("vendor-format credential in a production-looking file with no comment or prose around it;"
+                      " confirmed by rule, not sent to the model")
+            _store_judgment(con, finding_id, "confirmed", None, reason, "rules", 0, 0, 0)
+            stats.routed += 1
+            stats.confirmed += 1
+            if on_result:
+                on_result(category, preview, "confirmed", "by rule")
+            continue
+
         messages = [
             {"role": "system", "content": ADJUDICATE_SYSTEM},
             {"role": "user", "content": f"Rule category: {category}\nFile: {path or 'unknown'}\n\nExcerpt:\n{excerpt}"},

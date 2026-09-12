@@ -54,19 +54,25 @@ def test_redacted_window_hides_neighbouring_secrets_but_marks_the_target():
     assert out.endswith("APP_ENV=prod")
 
 
-def test_routing_sends_only_ambiguous_or_benign_looking_findings_to_the_model():
-    assert needs_model("generic_secret", "medium", None)
-    assert needs_model("phone", "low", "/p/src/main.py")
-    assert not needs_model("github_token", "high", "/p/src/deploy.py")
-    assert needs_model("github_token", "high", "/p/tests/test_auth.py")
-    assert needs_model("aws_access_key_id", "high", "/p/.env.example")
-    assert needs_model("openai_api_key", "high", "/p/docs/setup.md")
+def test_routing_sends_ambiguous_pathless_benign_path_or_commented_findings_to_the_model():
+    bare = "APP_ENV=production\nLOG_LEVEL=info\nGITHUB_TOKEN=«x»\nFEATURE_FLAGS=beta\n"
+    commented = "# stub value wired into the CI pipeline; GitHub never issued it\nGITHUB_TOKEN = \"«x»\"\n"
+    assert needs_model("generic_secret", "medium", None, bare)
+    assert needs_model("phone", "low", "/p/src/main.py", bare)
+    assert not needs_model("github_token", "high", "/p/src/deploy.py", bare)          # bare config line
+    assert needs_model("github_token", "high", "/p/ci/pipeline_stub.py", commented)   # comment beside it
+    assert needs_model("github_token", "high", None, bare)                            # pasted: no path
+    assert needs_model("github_token", "high", "/p/tests/test_auth.py", bare)
+    assert needs_model("aws_access_key_id", "high", "/p/.env.example", bare)
+    assert needs_model("openai_api_key", "high", "/p/docs/setup.md", bare)
+    prose = "The screenshots in this walkthrough use the canned credentials from the vendor tutorial:\n\n    AWS_ACCESS_KEY_ID=«x»\n"
+    assert needs_model("aws_access_key_id", "high", "/p/onboarding/walkthrough.md", prose)
 
 
 def test_adjudicate_routes_by_rule_and_judges_the_rest(tmp_path, fake_ollama):
     url, server = fake_ollama
     con = _setup(tmp_path, [
-        _tool_result("u1", f"GITHUB_TOKEN={GHP}", "/p/src/deploy.py"),                     # vendor key, prod path -> rule
+        _tool_result("u1", f"APP_ENV=prod\nGITHUB_TOKEN={GHP}\nLOG_LEVEL=info", "/p/src/deploy.py"),  # bare vendor key, prod path -> rule
         _tool_result("u2", f"# fixture for unit tests\nTOKEN = '{GHP}'", "/p/tests/test_auth.py"),  # benign path -> model
         _user("u3", f'DB_PASSWORD = "{REAL}"'),                                             # ambiguous -> model
     ])

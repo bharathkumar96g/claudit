@@ -64,10 +64,10 @@ def test_judge_job_runs_in_background_and_reports_progress(tmp_path, fake_ollama
 
     job = _wait(client, client.post("/api/judge", headers=POST).json()["job"])
     assert job["status"] == "done", job
-    # a vendor-format key with no file path is confirmed by rule; the model is never called
-    assert (job["result"]["judge"]["routed"], job["result"]["judge"]["judged"]) == (1, 0)
+    # a key pasted into a prompt has no file path, so its context is unknown and the model is asked
+    assert (job["result"]["judge"]["routed"], job["result"]["judge"]["judged"]) == (0, 1)
     finding = client.get("/api/findings").json()[0]
-    assert (finding["verdict"], finding["judged_by"]) == ("confirmed", "rules")
+    assert (finding["verdict"], finding["judged_by"]) == ("confirmed", "qwen2.5:7b")
 
 
 def test_judge_job_surfaces_unreachable_ollama(tmp_path):
