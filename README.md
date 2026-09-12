@@ -47,9 +47,15 @@ A local, always-dark security-console dashboard over the same DuckDB file: an ex
 
 The server binds to localhost, serves masked previews only, and has no endpoint for raw values — `claudit reveal` stays a CLI-only, on-demand read of the source transcript.
 
+DuckDB allows one writer per database file, so while `claudit serve` is running use the UI's Scan and Judge buttons; stop the server before running CLI commands against the same `--db`.
+
 ## Layer 1: deterministic detection
 
-Rules tuned for precision:
+235 rules: 17 written and tuned here, plus 218 vendor-token patterns imported from the [gitleaks](https://github.com/gitleaks/gitleaks) community rule set (MIT; vendored in `src/claudit/rules/` with its license and upstream commit). The importer maps each gitleaks rule's regex, entropy floor, keyword prefilter, and allowlists onto the same `Rule` type, repairs the two Go-regex idioms Python rejects (mid-pattern `(?i)`, `\z`), and skips the three rules claudit covers with tuned versions of its own. `claudit rules` lists them.
+
+Every rule carries keywords; a rule's regex only runs when one of its keywords occurs in the chunk, so most chunks are dismissed by a substring check rather than 235 regex passes. Identical chunks (the same file read twice) are scanned once and their findings reused.
+
+The hand-tuned rules:
 
 | category | severity | how |
 |---|---|---|
@@ -78,6 +84,7 @@ Cheap deterministic filter first, model only where judgment is needed; structure
 - One row per JSONL line in `events`; one row per text chunk the model saw or produced in `segments`; one row per hit in `findings`; model verdicts in `judgments` and `semantic_findings`. DuckDB, single file.
 - **Checkpointed by byte offset per file.** Reruns process only appended lines. A trailing partial line (Claude Code mid-write) is left for the next run.
 - Inserts are idempotent on content-derived ids; each file commits in one transaction, so a crash mid-file replays cleanly.
+- Events whose ids are already stored are skipped before any text is extracted or scanned.
 - **One file is one session.** Lines with no `sessionId` (session start, snapshots) take the session from the filename. The project is the directory the session was launched in — resolved once per file from the first `cwd` and remembered in the checkpoint, so a session that `cd`s around stays one project; per-event `cwd` is kept separately.
 - Events are keyed by the transcript's message `uuid`. A resumed Claude Code session copies earlier history into its new file, so the same message can appear in several files; files are scanned oldest-first and a message is counted once, in the session it first appeared in. The scan reports these as "already seen".
 
@@ -85,9 +92,9 @@ Cheap deterministic filter first, model only where judgment is needed; structure
 
 `report --eval` matches findings to the planted labels by `(session, category, fingerprint)` and prints precision / recall / F1 per category, with false positives and misses listed. Sessions carry decoys — git SHAs, UUIDs, `API_KEY=your_api_key_here`, `password = os.environ[...]`, epoch timestamps — to keep precision honest. Some plants are deliberately placed in benign contexts (a fake token in a unit test, a sample key in `.env.example`, an example in docs) with `expected_verdict: benign`, so the model layer is scored too.
 
-Current numbers on the default synthetic set (24 sessions, 31 plants, 4 benign-in-context), `qwen2.5:7b` on an M4:
+Current numbers on the default synthetic set (24 sessions, 31 plants across 27 categories including ten imported vendor formats), `qwen2.5:7b` on an M4:
 
-- Deterministic layer: 31/31 found, 0 false positives, 1.00 F1 across all 17 categories.
+- Deterministic layer: 31/31 found, 0 false positives, 1.00 F1 in every category. On real transcripts (1,247 chunks) the 218 imported rules produced no false positives.
 - Model layer, same 31 findings, ~4 min of model time per full pass:
 
 | adjudication prompt | real secrets kept | benign-in-context recognized | accuracy |

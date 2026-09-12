@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-DETECTOR_VERSION = 2
+DETECTOR_VERSION = 3
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
@@ -76,6 +76,8 @@ class Rule:
     priority: int
     group: int = 0
     validate: Callable[[str], bool] | None = None
+    keywords: tuple[str, ...] = ()  # lowercase; the regex only runs if one of these occurs in the text
+    source: str = "claudit"
 
 
 _PLACEHOLDER = re.compile(
@@ -143,6 +145,7 @@ RULES: list[Rule] = [
             r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?|mssql)://[^\s'\"@/]+:[^\s'\"@]+@[^\s'\"]+"
         ),
         95,
+        keywords=("://",),
     ),
     Rule(
         "aws_secret_access_key",
@@ -152,15 +155,26 @@ RULES: list[Rule] = [
         ),
         92,
         group=1,
+        keywords=("aws",),
     ),
-    Rule("aws_access_key_id", "high", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), 90),
-    Rule("anthropic_api_key", "high", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), 90),
-    Rule("openai_api_key", "high", re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"), 88),
-    Rule("github_token", "high", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})"), 90),
-    Rule("slack_token", "high", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), 90),
-    Rule("google_api_key", "high", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), 90),
-    Rule("stripe_key", "high", re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), 90),
-    Rule("jwt", "high", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), 80),
+    Rule(
+        "aws_access_key_id", "high", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), 90,
+        validate=lambda v: not v.endswith("EXAMPLE"),  # AWS documentation placeholders
+        keywords=("akia", "asia"),
+    ),
+    Rule("anthropic_api_key", "high", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), 90, keywords=("sk-ant-",)),
+    Rule("openai_api_key", "high", re.compile(r"\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}"), 88, keywords=("sk-",)),
+    Rule(
+        "github_token", "high", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})"), 90,
+        keywords=("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
+    ),
+    Rule("slack_token", "high", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), 90, keywords=("xox",)),
+    Rule("google_api_key", "high", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), 90, keywords=("aiza",)),
+    Rule(
+        "stripe_key", "high", re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), 90,
+        keywords=("_live_", "_test_"),
+    ),
+    Rule("jwt", "high", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), 80, keywords=("eyj",)),
     Rule("ssn", "high", re.compile(r"(?<![\d\-])\d{3}-\d{2}-\d{4}(?![\d\-])"), 70),
     Rule("credit_card", "high", re.compile(r"(?<!\d)(?:\d[ \-]?){12,18}\d(?!\d)"), 60, validate=_valid_card),
     Rule(
@@ -173,6 +187,7 @@ RULES: list[Rule] = [
         50,
         group=1,
         validate=_valid_generic,
+        keywords=("password", "passwd", "pwd", "secret", "token", "api", "access"),
     ),
     Rule(
         "email",
@@ -180,6 +195,7 @@ RULES: list[Rule] = [
         re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"),
         30,
         validate=_valid_email,
+        keywords=("@",),
     ),
     Rule(
         "phone",
@@ -200,8 +216,11 @@ _TRAILING_PUNCT = ";,)]}"
 
 
 def scan(text: str) -> list[Match]:
+    lowered = text.lower()
     candidates: list[tuple[int, int, Match]] = []
     for rule in RULES:
+        if rule.keywords and not any(k in lowered for k in rule.keywords):
+            continue
         for m in rule.pattern.finditer(text):
             value = m.group(rule.group)
             if not value:
@@ -229,3 +248,9 @@ def redact(text: str, matches: list[Match]) -> str:
     for m in sorted(matches, key=lambda m: m.start, reverse=True):
         out = f"{out[:m.start]}[REDACTED:{m.category}]{out[m.end:]}"
     return out
+
+
+from .rules_gitleaks import load_gitleaks_rules  # noqa: E402  (needs Rule defined above)
+
+GITLEAKS_RULES, GITLEAKS_FAILED = load_gitleaks_rules()
+RULES.extend(GITLEAKS_RULES)

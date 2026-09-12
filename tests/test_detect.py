@@ -6,7 +6,7 @@ from claudit.detect import luhn_ok, mask, redact, scan
 POSITIVE = {
     "anthropic_api_key": "ANTHROPIC_API_KEY=sk-ant-api03-" + "a1B2" * 20,
     "openai_api_key": "key sk-proj-" + "Zx9k" * 12,
-    "aws_access_key_id": "AWS_ACCESS_KEY_ID=AKIA" + "IOSFODNN7EXAMPLE",
+    "aws_access_key_id": "AWS_ACCESS_KEY_ID=AKIA" + "J4K7QZ2M9XP3RT6W",
     "aws_secret_access_key": "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY" + "EXAMPLEKEY",
     "github_token": "GITHUB_TOKEN=ghp_" + "A1b2C3d4" * 5,
     "slack_token": "xoxb-" + "123456789012-123456789012-AbCdEfGhIjKlMnOpQrStUvWx",
@@ -35,6 +35,7 @@ NEGATIVE = [
     "/Users/demo/projects/claudit/src/claudit/detect.py",
     "order 2024-000123 total 1234.56",
     "ThisIsAVeryLongCamelCaseIdentifierWithoutDigits",
+    "AWS_ACCESS_KEY_ID=AKIA" + "IOSFODNN7EXAMPLE",  # Amazon's documentation placeholder
     "mcp__6f616b42-0ed8-571e-823f-ee4aca6b7ce9__read_me",
     "so `ANTHROPIC_API_KEY=sk-ant-…` is one finding, not three",
     "ANTHROPIC_API_KEY=sk-ant-…",

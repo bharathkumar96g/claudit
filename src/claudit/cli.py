@@ -59,8 +59,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", default=DEFAULT_MODEL)
     s.add_argument("--base-url", default=DEFAULT_BASE_URL)
 
+    s = sub.add_parser("rules", help="list the detection rules")
+    s.add_argument("--all", action="store_true", help="list every rule id, not just the counts")
+
     sub.add_parser("reset", help="delete all ingested data and checkpoints")
     return p
+
+
+def _cmd_rules(args) -> int:
+    from collections import Counter
+
+    from .detect import GITLEAKS_FAILED, RULES
+
+    by_source = Counter(r.source for r in RULES)
+    by_sev = Counter(r.severity for r in RULES)
+    print(f"{len(RULES)} rules   " + "   ".join(f"{k} {v}" for k, v in by_source.items()))
+    print("by severity   " + "   ".join(f"{k} {by_sev[k]}" for k in ("critical", "high", "medium", "low")))
+    if GITLEAKS_FAILED:
+        print(f"could not load {len(GITLEAKS_FAILED)} gitleaks rules: {', '.join(GITLEAKS_FAILED)}")
+    if args.all:
+        for r in sorted(RULES, key=lambda r: (r.source, r.category)):
+            print(f"  {r.source:9} {r.severity:8} {r.category}")
+    return 0
 
 
 def _cmd_judge(con, args) -> int:
@@ -119,6 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"labels: {Path(args.out) / 'labels.json'}")
         return 0
 
+    if args.cmd == "rules":
+        return _cmd_rules(args)
+
     if args.cmd == "serve":
         from .server import create_app, serve
 
@@ -149,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
             f"files {stats.files}   new lines {stats.lines}   events {stats.events}   "
             f"segments {stats.segments}   findings {stats.findings}   invalid lines {stats.invalid}"
             + (f"   already seen {stats.duplicates}" if stats.duplicates else "")
+            + (f"   reused identical chunks {stats.reused}" if stats.reused else "")
         )
         if stats.lines == 0:
             print("nothing new since last scan")

@@ -27,6 +27,29 @@ class ScanStats:
     findings: int = 0
     invalid: int = 0
     duplicates: int = 0
+    reused: int = 0
+
+
+REUSE_MIN_CHARS = 512
+_FINDING_COLS = "category, severity, fingerprint, preview, start_off, end_off, match_len"
+
+
+def _reusable(con: duckdb.DuckDBPyConnection, sha: str, cache: dict) -> tuple[str, list[tuple]] | None:
+    """Redacted text and finding tuples of an identical chunk already scanned with the current rules, if any."""
+    if sha in cache:
+        return cache[sha]
+    row = con.execute("SELECT segment_id, text_redacted FROM segments WHERE text_sha256 = ? LIMIT 1", [sha]).fetchone()
+    if row is None:
+        return None
+    segment_id, redacted = row
+    rows = con.execute(
+        f"SELECT {_FINDING_COLS}, detector_version FROM findings WHERE segment_id = ?", [segment_id]
+    ).fetchall()
+    if any(r[-1] != DETECTOR_VERSION for r in rows):
+        return None
+    hit = (redacted, [r[:-1] for r in rows])
+    cache[sha] = hit
+    return hit
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -146,6 +169,20 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
     records = _parse_records(lines, line_no, stats)
     line_no += len(lines)
 
+    # A resumed session copies earlier history into its new file; those events are already stored,
+    # so skip them before extracting and scanning anything.
+    ids = [str(rec["uuid"]) for _, rec in records if rec.get("uuid")]
+    known: set[str] = set()
+    for i in range(0, len(ids), 5000):
+        known.update(
+            r[0] for r in con.execute(
+                "SELECT event_id FROM events WHERE list_contains(?, event_id)", [ids[i : i + 5000]]
+            ).fetchall()
+        )
+    if known:
+        stats.duplicates += len(known)
+        records = [(n, rec) for n, rec in records if str(rec.get("uuid") or "") not in known]
+
     # One file is one session; the project is the directory the session was launched in.
     # cwd can change mid-session, so it is resolved once per file and remembered in the checkpoint.
     file_session = path.stem
@@ -153,6 +190,7 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
 
     now = utc_now()
     ev_rows, seg_rows, fd_rows = [], [], []
+    reuse_cache: dict = {}
     for line_no_of, rec in records:
         event_id = str(rec.get("uuid") or short_id(str(path), str(line_no_of)))
         msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
@@ -168,17 +206,24 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
 
         for seq, (source, text) in enumerate(extract_segments(rec)):
             segment_id = short_id(event_id, source, str(seq))
-            matches = scan(text)
-            seg_rows.append(
-                (segment_id, event_id, session_id, project, source, seq,
-                 len(text), sha256(text), redact(text, matches), ts)
-            )
-            for m in matches:
+            sha = sha256(text)
+            hit = _reusable(con, sha, reuse_cache) if len(text) >= REUSE_MIN_CHARS else None
+            if hit is not None:
+                redacted, found = hit
+                stats.reused += 1
+            else:
+                matches = scan(text)
+                redacted = redact(text, matches)
+                found = [(m.category, m.severity, m.fingerprint, m.preview, m.start, m.end, m.end - m.start) for m in matches]
+                if len(text) >= REUSE_MIN_CHARS:
+                    reuse_cache[sha] = (redacted, found)
+            seg_rows.append((segment_id, event_id, session_id, project, source, seq, len(text), sha, redacted, ts))
+            for category, severity, fingerprint, preview, start, end, match_len in found:
                 fd_rows.append(
                     (
-                        short_id(segment_id, m.category, str(m.start)), segment_id, event_id,
-                        session_id, project, source, m.category, m.severity, m.fingerprint, m.preview,
-                        m.start, m.end, m.end - m.start, DETECTOR_VERSION, ts, now,
+                        short_id(segment_id, category, str(start)), segment_id, event_id,
+                        session_id, project, source, category, severity, fingerprint, preview,
+                        start, end, match_len, DETECTOR_VERSION, ts, now,
                     )
                 )
 
@@ -211,7 +256,7 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
     stats.events += after[0] - before[0]
     stats.segments += after[1] - before[1]
     stats.findings += after[2] - before[2]
-    stats.duplicates += len(ev_rows) - (after[0] - before[0])
+    stats.duplicates += len(ev_rows) - (after[0] - before[0])  # same-file repeats, if any
 
 
 def scan_dir(con: duckdb.DuckDBPyConnection, root: Path, stats: ScanStats) -> None:

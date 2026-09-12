@@ -75,7 +75,12 @@ CATEGORIES = [
     "github_token", "slack_token", "google_api_key", "stripe_key", "private_key", "jwt",
     "connection_string", "ssn", "credit_card", "email", "phone", "generic_secret",
     "high_entropy_string",
+    # covered by the imported gitleaks rules
+    "sendgrid-api-token", "twilio-api-key", "npm-access-token", "gitlab-pat", "slack-webhook-url",
+    "databricks-api-token", "huggingface-access-token", "digitalocean-pat", "telegram-bot-api-token",
+    "mailchimp-api-key",
 ]
+HEX = "0123456789abcdef"
 
 # Categories where a rule-matching value can still be harmless in context; the model layer must tell them apart.
 BENIGN_CAPABLE = ("github_token", "openai_api_key", "aws_access_key_id", "generic_secret")
@@ -178,6 +183,36 @@ def plant(rng: random.Random, category: str) -> tuple[str, str]:
     if category == "high_entropy_string":
         v = _entropy_blob(rng)
         return v, f"Paste this into the webhook dashboard: {v}"
+    if category == "sendgrid-api-token":
+        v = f"SG.{_rs(rng, 22, URLSAFE)}.{_rs(rng, 43, URLSAFE)}"
+        return v, f"SENDGRID_API_KEY={v}"
+    if category == "twilio-api-key":
+        v = "SK" + _rs(rng, 32, HEX)
+        return v, f"TWILIO_API_KEY={v}"
+    if category == "npm-access-token":
+        v = "npm_" + _rs(rng, 36)
+        return v, f"NPM_TOKEN={v}"
+    if category == "gitlab-pat":
+        v = "glpat-" + _rs(rng, 20, URLSAFE)
+        return v, f"GITLAB_TOKEN={v}"
+    if category == "slack-webhook-url":
+        v = f"https://hooks.slack.com/services/T{_rs(rng, 8, string.ascii_uppercase + string.digits)}/B{_rs(rng, 8, string.ascii_uppercase + string.digits)}/{_rs(rng, 24)}"
+        return v, f"SLACK_WEBHOOK_URL={v}"
+    if category == "databricks-api-token":
+        v = "dapi" + _rs(rng, 32, HEX)
+        return v, f"DATABRICKS_TOKEN={v}"
+    if category == "huggingface-access-token":
+        v = "hf_" + _rs(rng, 34, string.ascii_letters)
+        return v, f"HF_TOKEN={v}"
+    if category == "digitalocean-pat":
+        v = "dop_v1_" + _rs(rng, 64, HEX)
+        return v, f"DIGITALOCEAN_TOKEN={v}"
+    if category == "telegram-bot-api-token":
+        v = f"{_digits(rng, 10)}:A{_rs(rng, 34, URLSAFE)}"
+        return v, f"TELEGRAM_BOT_TOKEN={v}"
+    if category == "mailchimp-api-key":
+        v = f"{_rs(rng, 32, HEX)}-us{rng.randint(10, 21)}"
+        return v, f"MAILCHIMP_API_KEY={v}"
     raise ValueError(category)
 
 
