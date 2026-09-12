@@ -4,7 +4,15 @@ from pathlib import Path
 
 import duckdb
 
+# Everything in the database is derived from the transcripts, so a schema change simply rebuilds it.
+SCHEMA_VERSION = 2
+
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key   VARCHAR PRIMARY KEY,
+    value VARCHAR NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS checkpoints (
     file_path   VARCHAR PRIMARY KEY,
     byte_offset BIGINT NOT NULL,
@@ -12,7 +20,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     updated_at  TIMESTAMP NOT NULL,
     project     VARCHAR
 );
-ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS project VARCHAR;
 
 CREATE TABLE IF NOT EXISTS events (
     event_id    VARCHAR PRIMARY KEY,
@@ -29,17 +36,19 @@ CREATE TABLE IF NOT EXISTS events (
     ingested_at TIMESTAMP NOT NULL
 );
 
+-- No transcript text is stored (ADR-0002): metadata only.
 CREATE TABLE IF NOT EXISTS segments (
-    segment_id    VARCHAR PRIMARY KEY,
-    event_id      VARCHAR NOT NULL,
-    session_id    VARCHAR,
-    project       VARCHAR,
-    source        VARCHAR NOT NULL,
-    seq           INTEGER NOT NULL,
-    char_len      INTEGER NOT NULL,
-    text_sha256   VARCHAR NOT NULL,
-    text_redacted VARCHAR NOT NULL,
-    ts            TIMESTAMP
+    segment_id  VARCHAR PRIMARY KEY,
+    event_id    VARCHAR NOT NULL,
+    session_id  VARCHAR,
+    project     VARCHAR,
+    source      VARCHAR NOT NULL,
+    seq         INTEGER NOT NULL,
+    path        VARCHAR,
+    char_len    INTEGER NOT NULL,
+    n_lines     INTEGER NOT NULL,
+    text_sha256 VARCHAR NOT NULL,
+    ts          TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -62,23 +71,25 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 
 CREATE TABLE IF NOT EXISTS judgments (
-    finding_id    VARCHAR PRIMARY KEY,
-    verdict       VARCHAR NOT NULL,
-    confidence    DOUBLE,
-    reason        VARCHAR,
-    model         VARCHAR NOT NULL,
-    prompt_tokens INTEGER,
-    output_tokens INTEGER,
-    duration_ms   INTEGER,
-    judged_at     TIMESTAMP NOT NULL
+    finding_id     VARCHAR PRIMARY KEY,
+    verdict        VARCHAR NOT NULL,
+    confidence     DOUBLE,
+    reason         VARCHAR,
+    model          VARCHAR NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    prompt_tokens  INTEGER,
+    output_tokens  INTEGER,
+    duration_ms    INTEGER,
+    judged_at      TIMESTAMP NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS semantic_scans (
-    segment_id  VARCHAR PRIMARY KEY,
-    model       VARCHAR NOT NULL,
-    n_findings  INTEGER NOT NULL,
-    duration_ms INTEGER,
-    scanned_at  TIMESTAMP NOT NULL
+    segment_id     VARCHAR PRIMARY KEY,
+    model          VARCHAR NOT NULL,
+    prompt_version INTEGER NOT NULL,
+    n_findings     INTEGER NOT NULL,
+    duration_ms    INTEGER,
+    scanned_at     TIMESTAMP NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS semantic_findings (
@@ -100,12 +111,31 @@ CREATE TABLE IF NOT EXISTS semantic_findings (
 TABLES = ("semantic_findings", "semantic_scans", "judgments", "findings", "segments", "events", "checkpoints")
 
 
-def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(db_path))
+def _run_schema(con: duckdb.DuckDBPyConnection) -> None:
     for stmt in SCHEMA.split(";"):
         if stmt.strip():
             con.execute(stmt)
+    con.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", [str(SCHEMA_VERSION)])
+
+
+def _stored_version(con: duckdb.DuckDBPyConnection) -> int | None:
+    has_meta = con.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_name = 'meta'"
+    ).fetchone()[0]
+    if not has_meta:
+        return None
+    row = con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    return int(row[0]) if row else None
+
+
+def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(db_path))
+    existing = con.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main'").fetchone()[0]
+    if existing and _stored_version(con) != SCHEMA_VERSION:
+        for table in (*TABLES, "meta"):
+            con.execute(f"DROP TABLE IF EXISTS {table}")
+    _run_schema(con)
     return con
 
 

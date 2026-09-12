@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -49,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("reveal", help="print a finding's raw value from the source transcript (local only)")
     s.add_argument("finding_id")
+    s.add_argument("--force", action="store_true", help="allow even inside a Claude Code session")
+
+    s = sub.add_parser("eval", help="detection eval against a synthetic dir; non-zero exit if below thresholds (CI gate)")
+    s.add_argument("dir")
+    s.add_argument("--min-f1", type=float, default=1.0)
+    s.add_argument("--max-fp", type=int, default=0)
 
     s = sub.add_parser("serve", help="run the local web UI (binds to localhost)")
     s.add_argument("--host", default="127.0.0.1")
@@ -105,9 +112,9 @@ def _cmd_judge(con, args) -> int:
         on_result=lambda cat, prev, verdict, reason: print(f"  {verdict:11} {cat:22} {prev:20} {reason[:60]}"),
     )
     print(
-        f"judged {stats.judged}   confirmed {stats.confirmed}   benign {stats.benign}   unsure {stats.unsure}"
-        f"   unavailable {stats.unavailable}   tokens in/out {stats.prompt_tokens}/{stats.output_tokens}"
-        f"   {stats.duration_ms / 1000:.1f}s model time"
+        f"model-judged {stats.judged}   confirmed-by-rule {stats.routed}   confirmed {stats.confirmed}"
+        f"   benign {stats.benign}   unsure {stats.unsure}   unavailable {stats.unavailable}"
+        f"   tokens in/out {stats.prompt_tokens}/{stats.output_tokens}   {stats.duration_ms / 1000:.1f}s model time"
     )
 
     if args.semantic:
@@ -147,7 +154,10 @@ def main(argv: list[str] | None = None) -> int:
 
         eval_dir = Path(args.eval).expanduser() if args.eval else (Path("data/synthetic") if args.demo else None)
         transcripts = Path(args.dir).expanduser() if args.dir else (eval_dir if args.demo else cfg.transcripts_dir)
-        app = create_app(db_path, transcripts, eval_dir, args.base_url, args.model, demo=args.demo)
+        from .server import LOOPBACK_HOSTS
+
+        allowed = LOOPBACK_HOSTS if args.host in ("127.0.0.1", "localhost", "::1") else None
+        app = create_app(db_path, transcripts, eval_dir, args.base_url, args.model, demo=args.demo, allowed_hosts=allowed)
         print(f"claudit UI at http://{args.host}:{args.port}  (db {db_path}, scanning {transcripts})")
         serve(app, args.host, args.port)
         return 0
@@ -199,6 +209,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "reveal":
+        if os.environ.get("CLAUDECODE") and not args.force:
+            print(
+                "refusing: this shell is inside a Claude Code session, so the revealed value would be written"
+                " into a new transcript. Run it from a plain terminal, or pass --force."
+            )
+            return 1
         result = reveal_finding(con, args.finding_id)
         if result is None:
             print("not found, or the source transcript changed since ingest")
@@ -207,5 +223,15 @@ def main(argv: list[str] | None = None) -> int:
         print("Raw value re-read from the source transcript. Not stored anywhere.\n")
         print(excerpt)
         return 0
+
+    if args.cmd == "eval":
+        from .report import evaluate_data
+
+        d = evaluate_data(con, Path(args.dir).expanduser())
+        o = d["overall"]
+        print(f"detection  tp {o['tp']}  fp {o['fp']}  fn {o['fn']}  precision {o['precision']:.3f}  recall {o['recall']:.3f}  f1 {o['f1']:.3f}")
+        ok = o["f1"] >= args.min_f1 and o["fp"] <= args.max_fp
+        print("gate:", "PASS" if ok else f"FAIL (need f1 >= {args.min_f1}, fp <= {args.max_fp})")
+        return 0 if ok else 1
 
     return 1

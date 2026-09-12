@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: unit tests
+        run: uv run pytest -q
+      - name: detection eval gate (synthetic set, must stay at F1 = 1.0 with zero false positives)
+        run: |
+          uv run claudit --db /tmp/ci.duckdb synth --out /tmp/synthetic --sessions 60 --seed 7
+          uv run claudit --db /tmp/ci.duckdb scan --dir /tmp/synthetic --full
+          uv run claudit --db /tmp/ci.duckdb eval /tmp/synthetic
+      - name: secret scan of the repository itself
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

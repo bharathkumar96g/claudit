@@ -82,6 +82,17 @@ def test_private_key_preview_is_header_only_even_with_escaped_newlines():
     assert mask(header + "\nMIIEow\n-----END RSA " + "PRIVATE KEY-----", "private_key") == header + "…"
 
 
+def test_large_chunks_are_scanned_in_windows_with_correct_offsets():
+    from claudit.detect import SCAN_WINDOW
+
+    token = "ghp_" + "A1b2C3d4" * 5
+    filler = ("x" * 79 + "\n") * ((3 * SCAN_WINDOW) // 80)
+    text = filler + "GITHUB_TOKEN=" + token + "\n" + filler
+    matches = scan(text)
+    assert [m.category for m in matches] == ["github_token"]
+    assert text[matches[0].start:matches[0].end] == token
+
+
 def test_luhn():
     assert luhn_ok("4111111111111111")
     assert not luhn_ok("4111111111111112")

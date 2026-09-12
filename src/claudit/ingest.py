@@ -1,8 +1,8 @@
 """Checkpointed ingest of Claude Code JSONL transcripts.
 
-Detection runs in the ingest path, before anything is persisted, so the raw
-value of a secret never reaches disk: segments are stored redacted, findings
-carry a fingerprint and masked preview only.
+Detection runs in the ingest path and only metadata is persisted (ADR-0002): segments carry
+length, hash, source and file path; findings carry a fingerprint and a masked preview. No
+transcript text is written to the database.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import duckdb
 
-from .detect import DETECTOR_VERSION, redact, scan
+from .detect import DETECTOR_VERSION, scan
 from .util import sha256, short_id, utc_now
 
 
@@ -30,26 +30,15 @@ class ScanStats:
     reused: int = 0
 
 
+@dataclass(frozen=True)
+class Segment:
+    source: str
+    text: str
+    path: str | None = None
+
+
 REUSE_MIN_CHARS = 512
 _FINDING_COLS = "category, severity, fingerprint, preview, start_off, end_off, match_len"
-
-
-def _reusable(con: duckdb.DuckDBPyConnection, sha: str, cache: dict) -> tuple[str, list[tuple]] | None:
-    """Redacted text and finding tuples of an identical chunk already scanned with the current rules, if any."""
-    if sha in cache:
-        return cache[sha]
-    row = con.execute("SELECT segment_id, text_redacted FROM segments WHERE text_sha256 = ? LIMIT 1", [sha]).fetchone()
-    if row is None:
-        return None
-    segment_id, redacted = row
-    rows = con.execute(
-        f"SELECT {_FINDING_COLS}, detector_version FROM findings WHERE segment_id = ?", [segment_id]
-    ).fetchall()
-    if any(r[-1] != DETECTOR_VERSION for r in rows):
-        return None
-    hit = (redacted, [r[:-1] for r in rows])
-    cache[sha] = hit
-    return hit
 
 
 def _parse_ts(value: object) -> datetime | None:
@@ -91,36 +80,60 @@ def _flatten_input(inp: object) -> str:
     return "\n".join(parts)
 
 
-def extract_segments(rec: dict) -> list[tuple[str, str]]:
-    """Text chunks the model actually saw or produced, tagged by who put them there."""
+def _input_path(inp: object) -> str | None:
+    if not isinstance(inp, dict):
+        return None
+    for key in ("file_path", "path", "notebook_path"):
+        if isinstance(inp.get(key), str):
+            return inp[key]
+    return None
+
+
+def _result_path(rec: dict) -> str | None:
+    tur = rec.get("toolUseResult")
+    if isinstance(tur, dict):
+        file = tur.get("file")
+        if isinstance(file, dict) and isinstance(file.get("filePath"), str):
+            return file["filePath"]
+        if isinstance(tur.get("filePath"), str):
+            return tur["filePath"]
+    return None
+
+
+def extract_segments(rec: dict) -> list[Segment]:
+    """Text chunks the model saw or produced, tagged by who put them there and which file they came from."""
     kind = rec.get("type")
     msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
     content = msg.get("content")
-    out: list[tuple[str, str]] = []
+    out: list[Segment] = []
 
     if kind == "user":
         if isinstance(content, str):
-            out.append(("user_prompt", content))
+            out.append(Segment("user_prompt", content))
         elif isinstance(content, list):
+            result_path = _result_path(rec)
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "text":
-                    out.append(("user_prompt", str(block.get("text", ""))))
+                    out.append(Segment("user_prompt", str(block.get("text", ""))))
                 elif block.get("type") == "tool_result":
-                    out.append(("tool_result", _flatten(block.get("content"))))
+                    out.append(Segment("tool_result", _flatten(block.get("content")), result_path))
     elif kind == "assistant" and isinstance(content, list):
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text":
-                out.append(("assistant_text", str(block.get("text", ""))))
+                out.append(Segment("assistant_text", str(block.get("text", ""))))
+            elif block.get("type") == "thinking":
+                out.append(Segment("assistant_thinking", str(block.get("thinking", ""))))
             elif block.get("type") == "tool_use":
-                out.append(("tool_input", _flatten_input(block.get("input", {}))))
+                inp = block.get("input", {})
+                out.append(Segment("tool_input", _flatten_input(inp), _input_path(inp)))
     elif kind == "attachment" and rec.get("attachment") is not None:
-        out.append(("attachment", json.dumps(rec["attachment"], ensure_ascii=False)))
+        out.append(Segment("attachment", json.dumps(rec["attachment"], ensure_ascii=False)))
 
-    return [(source, text) for source, text in out if text and text.strip()]
+    return [s for s in out if s.text and s.text.strip()]
 
 
 def read_complete_lines(path: Path, offset: int) -> tuple[list[str], int]:
@@ -155,6 +168,23 @@ def _parse_records(lines: list[str], start_line: int, stats: ScanStats) -> list[
             continue
         out.append((line_no, rec))
     return out
+
+
+def _reusable(con: duckdb.DuckDBPyConnection, sha: str, cache: dict) -> list[tuple] | None:
+    """Finding tuples of an identical chunk already scanned with the current rules, if any."""
+    if sha in cache:
+        return cache[sha]
+    row = con.execute("SELECT segment_id FROM segments WHERE text_sha256 = ? LIMIT 1", [sha]).fetchone()
+    if row is None:
+        return None
+    rows = con.execute(
+        f"SELECT {_FINDING_COLS}, detector_version FROM findings WHERE segment_id = ?", [row[0]]
+    ).fetchall()
+    if any(r[-1] != DETECTOR_VERSION for r in rows):
+        return None
+    found = [r[:-1] for r in rows]
+    cache[sha] = found
+    return found
 
 
 def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, stats: ScanStats) -> None:
@@ -204,25 +234,26 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
             )
         )
 
-        for seq, (source, text) in enumerate(extract_segments(rec)):
-            segment_id = short_id(event_id, source, str(seq))
-            sha = sha256(text)
-            hit = _reusable(con, sha, reuse_cache) if len(text) >= REUSE_MIN_CHARS else None
-            if hit is not None:
-                redacted, found = hit
+        for seq, seg in enumerate(extract_segments(rec)):
+            segment_id = short_id(event_id, seg.source, str(seq))
+            sha = sha256(seg.text)
+            found = _reusable(con, sha, reuse_cache) if len(seg.text) >= REUSE_MIN_CHARS else None
+            if found is not None:
                 stats.reused += 1
             else:
-                matches = scan(text)
-                redacted = redact(text, matches)
+                matches = scan(seg.text)
                 found = [(m.category, m.severity, m.fingerprint, m.preview, m.start, m.end, m.end - m.start) for m in matches]
-                if len(text) >= REUSE_MIN_CHARS:
-                    reuse_cache[sha] = (redacted, found)
-            seg_rows.append((segment_id, event_id, session_id, project, source, seq, len(text), sha, redacted, ts))
+                if len(seg.text) >= REUSE_MIN_CHARS:
+                    reuse_cache[sha] = found
+            seg_rows.append(
+                (segment_id, event_id, session_id, project, seg.source, seq, seg.path,
+                 len(seg.text), seg.text.count("\n") + 1, sha, ts)
+            )
             for category, severity, fingerprint, preview, start, end, match_len in found:
                 fd_rows.append(
                     (
                         short_id(segment_id, category, str(start)), segment_id, event_id,
-                        session_id, project, source, category, severity, fingerprint, preview,
+                        session_id, project, seg.source, category, severity, fingerprint, preview,
                         start, end, match_len, DETECTOR_VERSION, ts, now,
                     )
                 )
@@ -238,7 +269,7 @@ def scan_file(con: duckdb.DuckDBPyConnection, path: Path, project_hint: str, sta
         if ev_rows:
             con.executemany("INSERT OR IGNORE INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", ev_rows)
         if seg_rows:
-            con.executemany("INSERT OR IGNORE INTO segments VALUES (?,?,?,?,?,?,?,?,?,?)", seg_rows)
+            con.executemany("INSERT OR IGNORE INTO segments VALUES (?,?,?,?,?,?,?,?,?,?,?)", seg_rows)
         if fd_rows:
             con.executemany(
                 "INSERT OR IGNORE INTO findings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", fd_rows

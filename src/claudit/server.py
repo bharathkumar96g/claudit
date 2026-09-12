@@ -8,9 +8,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import duckdb
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import connect, truncate_all
@@ -21,6 +20,8 @@ from .report import evaluate_data
 from .synth import generate
 
 WEB_DIR = Path(__file__).parent / "web"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+CSRF_HEADER = ("x-requested-with", "claudit")
 
 
 @dataclass
@@ -37,6 +38,12 @@ def _iso(v: object) -> str | None:
     return v.isoformat() if isinstance(v, datetime) else None
 
 
+def _host_only(header: str) -> str:
+    if header.startswith("["):
+        return header.split("]")[0] + "]"
+    return header.rsplit(":", 1)[0] if ":" in header else header
+
+
 def create_app(
     db_path: Path,
     transcripts_dir: Path,
@@ -44,11 +51,21 @@ def create_app(
     ollama_url: str,
     model: str,
     demo: bool,
+    allowed_hosts: frozenset[str] | None = LOOPBACK_HOSTS,
 ) -> FastAPI:
     con = connect(db_path)
     lock = threading.Lock()
     jobs: dict[str, Job] = {}
     app = FastAPI(title="claudit", docs_url=None, redoc_url=None)
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        # A page in your browser can POST to localhost without your consent; a custom header stops that.
+        if allowed_hosts is not None and _host_only(request.headers.get("host", "")) not in allowed_hosts:
+            return JSONResponse({"detail": "forbidden host"}, status_code=403)
+        if request.method == "POST" and request.headers.get(CSRF_HEADER[0]) != CSRF_HEADER[1]:
+            return JSONResponse({"detail": "missing X-Requested-With: claudit"}, status_code=403)
+        return await call_next(request)
 
     @app.get("/")
     def index():
@@ -93,14 +110,15 @@ def create_app(
         with lock:
             rows = con.execute(
                 "SELECT f.finding_id, f.ts, f.severity, f.category, f.preview, f.source, f.project,"
-                " f.session_id, j.verdict, j.confidence, j.reason"
-                " FROM findings f LEFT JOIN judgments j ON j.finding_id = f.finding_id"
+                " f.session_id, s.path, j.verdict, j.model, j.reason"
+                " FROM findings f JOIN segments s ON s.segment_id = f.segment_id"
+                " LEFT JOIN judgments j ON j.finding_id = f.finding_id"
                 " ORDER BY f.ts DESC NULLS LAST"
             ).fetchall()
         return [
             {"id": fid, "ts": _iso(ts), "severity": sev, "category": cat, "preview": prev, "source": src,
-             "project": proj, "session": sid, "verdict": verdict, "confidence": conf, "reason": reason}
-            for fid, ts, sev, cat, prev, src, proj, sid, verdict, conf, reason in rows
+             "project": proj, "session": sid, "path": path, "verdict": verdict, "judged_by": jmodel, "reason": reason}
+            for fid, ts, sev, cat, prev, src, proj, sid, path, verdict, jmodel, reason in rows
         ]
 
     @app.post("/api/scan")

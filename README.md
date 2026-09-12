@@ -8,9 +8,9 @@ Claude Code writes every session to disk as JSONL. `claudit` ingests those trans
 
 The dataset for this tool is, by definition, your most sensitive data. So the safe design is structural, not a setting:
 
-- **Detection runs in the ingest path**, before anything is persisted. Segments are stored already redacted.
-- **Findings store a SHA-256 fingerprint and a masked preview** (`sk-a…7f`), never the value. You can still see that the same key leaked in four sessions; you can't read it out of the database.
-- **The model layer is local.** It talks to an Ollama server on `localhost`; no API keys, no cloud, no telemetry. When it needs a raw value for context it re-reads the source transcript on demand and verifies the hash, and its written reasons are scrubbed of the value and of any 8+ character fragment of it.
+- **No transcript text is stored.** Detection runs in the ingest path; the database keeps only metadata about each chunk (length, hash, source, file path) and, per finding, a **SHA-256 fingerprint and a masked preview** (`sk-a…7f`). You can see that the same key leaked in four sessions; you can't read it — or anything around it — out of the database. ([ADR-0002](docs/adr/0002-store-no-transcript-text.md))
+- **The model layer is local.** It talks to an Ollama server on `localhost`; no API keys, no cloud, no telemetry. When it needs context it re-reads the source transcript on demand, verifies the hash, and builds an excerpt in which every *other* detected value is already redacted. Its written reasons are scrubbed of the value and of any 8+ character fragment of it.
+- **The local server defends itself.** POSTs require a custom header (so a web page you visit can't trigger a scan or wipe the demo), the Host header must be a loopback origin, and `claudit reveal` refuses to run inside a Claude Code session — where its output would be written straight into a new transcript.
 - **The demo runs on synthetic data.** `claudit synth` generates transcripts with planted, labeled fake secrets. That's the test fixture, the eval set, and the only thing that ever gets published.
 
 ## Quickstart
@@ -74,7 +74,7 @@ Every finding records its **source** — `user_prompt`, `tool_result`, `tool_inp
 
 Regex can say "this has the shape of a secret." It can't say whether it's real. The judgment layer does two things a pattern can't:
 
-- **Adjudicate.** For each finding it re-reads the source line, wraps the value in ~400 chars of context, and asks the model: real secret, or a test fixture / `.env.example` / docs sample / throwaway local credential? Verdict, confidence, and a scrubbed reason are stored per finding. Reviews are incremental; `--rejudge` redoes them (after a prompt or model change).
+- **Route, then adjudicate.** Vendor-format credentials (`AKIA…`, `ghp_…`, `sk-ant-…`) found outside a test, docs, or example path are confirmed by rule and never sent to the model — their format is the evidence. Everything ambiguous (generic passwords, high-entropy strings, PII) and anything in a benign-looking path goes to the model with the file path and ~400 chars of context in which every other detected value is already redacted. Verdict, a scrubbed reason, the model name, and the prompt version are stored per finding; findings judged under an older prompt are re-judged automatically. Self-reported confidence is stored but not shown — it is uncalibrated until the model bench (Phase 1) says otherwise.
 - **Semantic scan** (`--semantic`). Reads already-redacted prompts and reports sensitive content with no pattern: customer or employee data, internal hostnames and architecture, proprietary logic, financial figures.
 
 Cheap deterministic filter first, model only where judgment is needed; structured JSON output enforced by schema; temperature 0. Any Ollama model works: `--model llama3.1:8b`.
@@ -84,26 +84,32 @@ Cheap deterministic filter first, model only where judgment is needed; structure
 - One row per JSONL line in `events`; one row per text chunk the model saw or produced in `segments`; one row per hit in `findings`; model verdicts in `judgments` and `semantic_findings`. DuckDB, single file.
 - **Checkpointed by byte offset per file.** Reruns process only appended lines. A trailing partial line (Claude Code mid-write) is left for the next run.
 - Inserts are idempotent on content-derived ids; each file commits in one transaction, so a crash mid-file replays cleanly.
-- Events whose ids are already stored are skipped before any text is extracted or scanned.
+- Events whose ids are already stored are skipped before any text is extracted or scanned. Chunks over 64 KB are scanned in overlapping windows so one huge attachment can't stall a run.
+- A schema change bumps `SCHEMA_VERSION`; on the next connect the database is dropped and rebuilt from the transcripts, which are the only source of truth.
 - **One file is one session.** Lines with no `sessionId` (session start, snapshots) take the session from the filename. The project is the directory the session was launched in — resolved once per file from the first `cwd` and remembered in the checkpoint, so a session that `cd`s around stays one project; per-event `cwd` is kept separately.
 - Events are keyed by the transcript's message `uuid`. A resumed Claude Code session copies earlier history into its new file, so the same message can appear in several files; files are scanned oldest-first and a message is counted once, in the session it first appeared in. The scan reports these as "already seen".
 
 ## Evaluation
 
-`report --eval` matches findings to the planted labels by `(session, category, fingerprint)` and prints precision / recall / F1 per category, with false positives and misses listed. Sessions carry decoys — git SHAs, UUIDs, `API_KEY=your_api_key_here`, `password = os.environ[...]`, epoch timestamps — to keep precision honest. Some plants are deliberately placed in benign contexts (a fake token in a unit test, a sample key in `.env.example`, an example in docs) with `expected_verdict: benign`, so the model layer is scored too.
+`report --eval` matches findings to the planted labels by `(session, category, fingerprint)` and prints precision / recall / F1 per category, with false positives and misses listed. `claudit eval DIR` is the same check as a CI gate: non-zero exit unless F1 = 1.0 with zero false positives. Sessions carry decoys — git SHAs, UUIDs, `API_KEY=your_api_key_here`, `password = os.environ[...]`, epoch timestamps — to keep precision honest, and plants land in every source Claude Code records, including `thinking` blocks.
 
-Current numbers on the default synthetic set (24 sessions, 31 plants across 27 categories including ten imported vendor formats), `qwen2.5:7b` on an M4:
+30% of plants are deliberately benign-in-context, in two sets: **seen** uses the vocabulary the judge prompt was written against (fixture, `.env.example`, "made-up example"); **held-out** uses disjoint wording and paths that don't look like tests or docs (a "stub value wired into the CI pipeline", "canned credentials from the vendor tutorial", a "disposable compose stack"). Only the held-out number says anything about how the judge generalises, and both are reported with their n.
 
-- Deterministic layer: 31/31 found, 0 false positives, 1.00 F1 in every category. On real transcripts (1,247 chunks) the 218 imported rules produced no false positives.
-- Model layer, same 31 findings, ~4 min of model time per full pass:
+Current numbers, reproducible with `claudit synth --sessions 60 --seed 7 && claudit scan --dir data/synthetic --full && claudit judge --rejudge && claudit report --eval data/synthetic` (`qwen2.5:7b` on an M4):
 
-| adjudication prompt | real secrets kept | benign-in-context recognized | accuracy |
+**Detection** — 76 plants across 27 categories and every source including `thinking` blocks: 76/76 found, 0 false positives, F1 1.00. On real transcripts (1,817 chunks, unlabeled) the imported rules produced no hits beyond the hand-tuned ones — zero hits, not proven zero errors.
+
+**Judgment** — 76 findings; routing sent 25 to the model (89 s) and confirmed 51 by rule:
+
+| expected | confirmed | benign | n |
 |---|---|---|---|
-| v1 — format-focused | 27/27 | 1/4 | 0.90 |
-| v2 — context-focused | 15/27 | 4/4 | 0.61 |
-| v3 — default real, benign only on an explicit marker (current) | 24/27 (+2 unsure) | 2/4 | 0.84 |
+| real secret | **53** | 0 | 53 |
+| benign, seen vocabulary | 4 | **8** | 12 |
+| benign, held-out vocabulary | 11 | **0** | 11 |
 
-v1 rubber-stamps the regex; v2 treats "the conversation is about something else" as evidence the secret is fake and dismisses 12 real ones. v3 states the default explicitly and lands between them: one real secret dismissed, two flagged unsure, half the benign contexts recognized. A 7B model follows whichever way the prompt leans, so the remaining gap is a model-size question as much as a prompt one — the same eval on a larger model is the next experiment.
+Read it honestly: no real secret is dismissed; benign recognition works on wording the prompt was written against and **fails completely on wording it wasn't** — and most of that failure is routing, not the model. 8 of the 11 held-out plants were vendor-format keys in paths that don't look like tests or docs, so they were confirmed by rule and the model never saw the "stub value wired into the CI pipeline" comment beside them; 3 more were pasted into prompts, where there is no file path to trigger the model. Of the plants the model actually read, it scored 8/9 on seen vocabulary and 0/3 on held-out.
+
+Earlier prompt iterations (v1 0.90, v2 0.61, v3 0.84 on a 31-plant set) were measured against benign plants written in the prompt's own vocabulary with n=4; those numbers are superseded by the table above and should not be quoted. Next (Phase 1): route on context, not only path; a prompt that describes the concept rather than listing words; the same eval across larger local models.
 
 The eval has already paid for itself: it caught a bug where JSON-escaping tool inputs broke multi-line matches *and* leaked a full private key into the preview column, and a second one where a model's reason repeated the password portion of a connection string.
 

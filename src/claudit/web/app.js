@@ -94,7 +94,8 @@ function setLive(mode, text) {
 }
 
 // ---------- data ----------
-async function api(path, opts) {
+async function api(path, opts = {}) {
+  if (opts.method === "POST") opts.headers = { ...(opts.headers || {}), "X-Requested-With": "claudit" };
   const r = await fetch(path, opts);
   if (!r.ok) {
     let msg = r.statusText;
@@ -359,17 +360,18 @@ function renderFeed(rows) {
       h("span", { class: "tag sev-" + r.severity }, r.severity === "critical" ? "crit" : r.severity === "medium" ? "med" : r.severity),
       h("span", { class: "cat", title: r.category }, r.category),
       h("span", { class: "prev", title: r.preview }, r.preview),
-      h("span", { class: "src" }, r.source),
-      h("span", { class: "proj", title: r.project }, shortProject(r.project)),
+      h("span", { class: "src", title: r.path || "" }, r.source),
+      h("span", { class: "proj", title: r.path ? `${r.project}\n${r.path}` : r.project }, r.path ? shortProject(r.path) : shortProject(r.project)),
       h("span", {}, verdict),
     );
     out.push(row);
     if (state.expanded === r.id) {
       out.push(h("div", { class: "detail" },
         h("div", {}, h("b", {}, "finding "), h("span", { class: "mono" }, r.id), "  ·  session ", h("span", { class: "mono" }, r.session || "")),
+        h("div", {}, h("b", {}, "project "), h("span", { class: "mono" }, r.project || ""), r.path ? ["  ·  ", h("b", {}, "file "), h("span", { class: "mono" }, r.path)] : null),
         r.verdict
-          ? h("div", {}, h("b", {}, `model: ${r.verdict}`), r.confidence !== null && r.confidence !== undefined ? ` (confidence ${r.confidence.toFixed(2)})` : "", " — ", r.reason || "")
-          : h("div", { class: "muted" }, "not yet reviewed by the model"),
+          ? h("div", {}, h("b", {}, `${r.judged_by === "rules" ? "rule" : "model"}: ${r.verdict}`), " — ", r.reason || "")
+          : h("div", { class: "muted" }, "not yet reviewed"),
         h("div", { class: "muted mono" }, `raw value, locally: claudit reveal ${r.id}`),
       ));
     }

@@ -138,23 +138,36 @@ def evaluate_data(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> dict:
     overall = row("ALL", len(tp_keys), len(fps), len(fns))
 
     judge = None
-    verdict_by_key: dict[tuple, str] = {}
-    for sid, cat, fp, verdict in con.execute(
-        "SELECT f.session_id, f.category, f.fingerprint, j.verdict FROM findings f JOIN judgments j ON j.finding_id = f.finding_id"
+    verdict_by_key: dict[tuple, tuple[str, str]] = {}
+    for sid, cat, fp, verdict, jmodel in con.execute(
+        "SELECT f.session_id, f.category, f.fingerprint, j.verdict, j.model"
+        " FROM findings f JOIN judgments j ON j.finding_id = f.finding_id"
     ).fetchall():
         if sid in sessions:
-            verdict_by_key[(sid, cat, fp)] = verdict
+            verdict_by_key[(sid, cat, fp)] = (verdict, jmodel)
     if verdict_by_key:
+        # Benign plants are split into the vocabulary the prompt was written against ("seen") and
+        # disjoint wording ("heldout"); only the latter says anything about generalisation.
         confusion: Counter = Counter()
+        by_rule = 0
         for p in plants:
             key = (p["session_id"], p["category"], p["fingerprint"])
-            if key in tp_keys:
-                confusion[(p.get("expected_verdict", "confirmed"), verdict_by_key.get(key, "not judged"))] += 1
+            if key not in tp_keys:
+                continue
+            expected = p.get("expected_verdict", "confirmed")
+            if expected == "benign":
+                expected = f"benign/{p.get('benign_set', 'seen')}"
+            actual, jmodel = verdict_by_key.get(key, ("not judged", None))
+            if jmodel == "rules":
+                by_rule += 1
+            confusion[(expected, actual)] += 1
+        expected_rows = ("confirmed", "benign/seen", "benign/heldout")
         judged = sum(v for (e, a), v in confusion.items() if a not in ("not judged", "unavailable"))
-        correct = confusion[("confirmed", "confirmed")] + confusion[("benign", "benign")]
+        correct = confusion[("confirmed", "confirmed")] + confusion[("benign/seen", "benign")] + confusion[("benign/heldout", "benign")]
         judge = {
-            "rows": [{"expected": e, **{a: confusion[(e, a)] for a in VERDICT_COLUMNS}} for e in ("confirmed", "benign")],
+            "rows": [{"expected": e, **{a: confusion[(e, a)] for a in VERDICT_COLUMNS}} for e in expected_rows],
             "judged": judged,
+            "by_rule": by_rule,
             "accuracy": correct / judged if judged else None,
         }
 
@@ -195,8 +208,8 @@ def evaluate(con: duckdb.DuckDBPyConnection, eval_dir: Path) -> str:
         j = d["judge"]
         acc = f"{j['accuracy']:.2f}" if j["accuracy"] is not None else "n/a"
         parts.append(
-            "\nModel judgment accuracy on planted secrets (rows: expected, columns: model verdict)\n"
+            "\nJudgment accuracy on planted secrets (rows: expected, columns: verdict)\n"
             + _table(["expected", *VERDICT_COLUMNS], [(r["expected"], *[r[a] for a in VERDICT_COLUMNS]) for r in j["rows"]])
-            + f"\naccuracy {acc} over {j['judged']} judged"
+            + f"\naccuracy {acc} over {j['judged']} judged ({j['by_rule']} confirmed by rule without the model)"
         )
     return "\n".join(parts)

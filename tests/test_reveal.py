@@ -25,6 +25,7 @@ def test_reveal_returns_exact_value_and_detects_tampering(tmp_path):
     value, excerpt = reveal_finding(con, finding_id)
     assert value == TOKEN
     assert f"«{TOKEN}»" in excerpt and excerpt.endswith("for the deploy step")
+    assert con.execute("SELECT count(*) FROM information_schema.columns WHERE table_name='segments' AND column_name LIKE 'text%'").fetchone()[0] == 1  # only the hash
 
     f.write_text(json.dumps(_rec("use GITHUB_TOKEN=ghp_" + "Z9y8X7w6" * 5 + " for the deploy step")) + "\n")
     assert reveal_finding(con, finding_id) is None

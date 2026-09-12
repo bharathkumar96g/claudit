@@ -78,6 +78,7 @@ class Rule:
     validate: Callable[[str], bool] | None = None
     keywords: tuple[str, ...] = ()  # lowercase; the regex only runs if one of these occurs in the text
     source: str = "claudit"
+    validate_match: Callable[[re.Match[str]], bool] | None = None  # sees the whole match, not just the secret
 
 
 _PLACEHOLDER = re.compile(
@@ -213,22 +214,30 @@ RULES: list[Rule] = [
 ]
 
 _TRAILING_PUNCT = ";,)]}"
+_QUOTES = "\"'`"
+SCAN_WINDOW = 65_536
+SCAN_OVERLAP = 512
 
 
-def scan(text: str) -> list[Match]:
+def _scan_span(text: str) -> list[Match]:
     lowered = text.lower()
     candidates: list[tuple[int, int, Match]] = []
     for rule in RULES:
         if rule.keywords and not any(k in lowered for k in rule.keywords):
             continue
         for m in rule.pattern.finditer(text):
-            value = m.group(rule.group)
-            if not value:
-                continue
-            value = value.rstrip(_TRAILING_PUNCT)
-            if not value or (rule.validate and not rule.validate(value)):
+            raw = m.group(rule.group)
+            if not raw:
                 continue
             start = m.start(rule.group)
+            # A captured value never includes the quotes around it; imported rules sometimes capture them.
+            value = raw.lstrip(_QUOTES)
+            start += len(raw) - len(value)
+            value = value.rstrip(_QUOTES).rstrip(_TRAILING_PUNCT)
+            if not value or (rule.validate and not rule.validate(value)):
+                continue
+            if rule.validate_match and not rule.validate_match(m):
+                continue
             candidates.append(
                 (rule.priority, start, Match(rule.category, rule.severity, start, start + len(value), value))
             )
@@ -241,6 +250,28 @@ def scan(text: str) -> list[Match]:
         accepted.append(cand)
     accepted.sort(key=lambda m: m.start)
     return accepted
+
+
+def scan(text: str) -> list[Match]:
+    """Large chunks are scanned in overlapping windows so one 229 KB attachment can't stall the run."""
+    if len(text) <= SCAN_WINDOW:
+        return _scan_span(text)
+    seen: set[tuple[str, int]] = set()
+    out: list[Match] = []
+    pos = 0
+    while pos < len(text):
+        window = text[pos : pos + SCAN_WINDOW]
+        for m in _scan_span(window):
+            key = (m.category, pos + m.start)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Match(m.category, m.severity, pos + m.start, pos + m.end, m.value))
+        if pos + SCAN_WINDOW >= len(text):
+            break
+        pos += SCAN_WINDOW - SCAN_OVERLAP
+    out.sort(key=lambda m: m.start)
+    return out
 
 
 def redact(text: str, matches: list[Match]) -> str:

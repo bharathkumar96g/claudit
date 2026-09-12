@@ -7,6 +7,7 @@ from pathlib import Path
 
 import duckdb
 
+from .detect import Match, redact, scan
 from .ingest import extract_segments
 from .util import sha256
 
@@ -39,10 +40,28 @@ def reveal_segment(con: duckdb.DuckDBPyConnection, segment_id: str) -> str | Non
         return None
 
     segments = extract_segments(rec)
-    if seq >= len(segments) or segments[seq][0] != source:
+    if seq >= len(segments) or segments[seq].source != source:
         return None
-    text = segments[seq][1]
+    text = segments[seq].text
     return text if sha256(text) == expected_sha else None
+
+
+def redacted_window(text: str, start: int, end: int, window: int) -> str:
+    """Text around [start, end) with every other detected value redacted and the target marked «…»."""
+    lo, hi = max(0, start - window), min(len(text), end + window)
+    piece = text[lo:hi]
+    t_start, t_end = start - lo, end - lo
+    others = [m for m in scan(piece) if not (m.start < t_end and t_start < m.end)]
+    marked = Match("target", "", t_start, t_end, piece[t_start:t_end])
+    out = piece
+    for m in sorted([*others, marked], key=lambda m: m.start, reverse=True):
+        replacement = f"«{m.value}»" if m is marked else f"[REDACTED:{m.category}]"
+        out = f"{out[:m.start]}{replacement}{out[m.end:]}"
+    return out
+
+
+def redacted_text(text: str) -> str:
+    return redact(text, scan(text))
 
 
 def reveal_finding(con: duckdb.DuckDBPyConnection, finding_id: str, context: int = 200) -> tuple[str, str] | None:
@@ -59,5 +78,4 @@ def reveal_finding(con: duckdb.DuckDBPyConnection, finding_id: str, context: int
     value = text[start:end]
     if sha256(value) != fingerprint:
         return None
-    excerpt = f"{text[max(0, start - context):start]}«{value}»{text[end:end + context]}"
-    return value, excerpt
+    return value, redacted_window(text, start, end, context)

@@ -84,7 +84,6 @@ HEX = "0123456789abcdef"
 
 # Categories where a rule-matching value can still be harmless in context; the model layer must tell them apart.
 BENIGN_CAPABLE = ("github_token", "openai_api_key", "aws_access_key_id", "generic_secret")
-BENIGN_RATE = 0.35
 
 
 @dataclass
@@ -95,6 +94,7 @@ class Plant:
     source: str
     expected: str
     file_name: str | None = None
+    benign_set: str | None = None  # "seen": wording the judge prompt lists; "heldout": disjoint wording
 
 
 def _rs(rng: random.Random, n: int, alphabet: str = B62) -> str:
@@ -216,6 +216,28 @@ def plant(rng: random.Random, category: str) -> tuple[str, str]:
     raise ValueError(category)
 
 
+def benign_plant_heldout(rng: random.Random, category: str) -> tuple[str, str, str]:
+    """Benign contexts phrased without any of the words the judge prompt lists, in paths that don't look like tests or docs."""
+    value, _ = plant(rng, category)
+    if category == "github_token":
+        return value, f'# stub value wired into the CI pipeline; GitHub never issued it\nGITHUB_TOKEN = "{value}"\n', "ci/pipeline_stub.py"
+    if category == "openai_api_key":
+        return value, (
+            f"# seeded into the sandbox tenant by make bootstrap; the sandbox has no billing attached\nexport OPENAI_API_KEY={value}\n"
+        ), "scripts/bootstrap_sandbox.sh"
+    if category == "aws_access_key_id":
+        return value, (
+            "The screenshots in this walkthrough use the canned credentials from the vendor tutorial:\n\n"
+            f"    AWS_ACCESS_KEY_ID={value}\n\nThey were minted for the tutorial and are inert.\n"
+        ), "onboarding/walkthrough.md"
+    if category == "generic_secret":
+        return value, (
+            "# default for the disposable compose stack that ships with the repo; every deployed environment overrides it\n"
+            f'      - DB_PASSWORD={value}\n'
+        ), "docker-compose.override.yml"
+    raise ValueError(category)
+
+
 def benign_plant(rng: random.Random, category: str) -> tuple[str, str, str]:
     """A value the rules will flag, in a context that makes it harmless. Returns (value, embed, file name)."""
     value, _ = plant(rng, category)
@@ -235,11 +257,15 @@ def benign_plant(rng: random.Random, category: str) -> tuple[str, str, str]:
     raise ValueError(category)
 
 
-def make_plant(rng: random.Random, category: str) -> Plant:
-    source = rng.choices(["user_prompt", "tool_result", "tool_input"], [0.4, 0.45, 0.15])[0]
-    if category in BENIGN_CAPABLE and rng.random() < BENIGN_RATE:
-        value, embed, file_name = benign_plant(rng, category)
-        return Plant(category, value, embed, source, "benign", file_name)
+def make_plant(rng: random.Random, spec: tuple[str, str]) -> Plant:
+    """spec = (category, kind) with kind in {"confirmed", "seen", "heldout"}."""
+    category, kind = spec
+    source = rng.choices(
+        ["user_prompt", "tool_result", "tool_input", "assistant_thinking"], [0.35, 0.4, 0.15, 0.1]
+    )[0]
+    if kind != "confirmed":
+        value, embed, file_name = (benign_plant_heldout if kind == "heldout" else benign_plant)(rng, category)
+        return Plant(category, value, embed, source, "benign", file_name, kind)
     value, embed = plant(rng, category)
     return Plant(category, value, embed, source, "confirmed")
 
@@ -274,7 +300,7 @@ def _benign_file(rng: random.Random) -> tuple[str, str]:
 
 
 def build_session(
-    rng: random.Random, project: str, session_id: str, start: datetime, categories: list[str]
+    rng: random.Random, project: str, session_id: str, start: datetime, specs: list[tuple[str, str]]
 ) -> tuple[list[dict], list[dict]]:
     cwd = f"/Users/demo/projects/{project}"
     lines: list[dict] = []
@@ -315,12 +341,13 @@ def build_session(
                 "source": p.source,
                 "category": p.category,
                 "expected_verdict": p.expected,
+                "benign_set": p.benign_set,
                 "fingerprint": sha256(p.value),
                 "preview": mask(p.value, p.category),
             }
         )
 
-    plants = [make_plant(rng, c) for c in categories]
+    plants = [make_plant(rng, spec) for spec in specs]
     n_turns = max(len(plants), rng.randint(2, 5))
     turn_of: dict[int, list[Plant]] = {i: [] for i in range(n_turns)}
     for i, p in enumerate(plants):
@@ -344,6 +371,7 @@ def build_session(
         tool_id = "toolu_" + _rs(rng, 24)
         read_plants = [p for p in here if p.source == "tool_result"]
         write_plants = [p for p in here if p.source == "tool_input"]
+        think_plants = [p for p in here if p.source == "assistant_thinking"]
         if write_plants:
             name, content = _file_for(rng, write_plants[0])
             tool_use = {"type": "tool_use", "id": tool_id, "name": "Write",
@@ -352,8 +380,15 @@ def build_session(
             name, content = _file_for(rng, read_plants[0]) if read_plants else _benign_file(rng)
             tool_use = {"type": "tool_use", "id": tool_id, "name": "Read", "input": {"file_path": f"{cwd}/{name}"}}
 
-        emit("assistant", {"role": "assistant", "model": "claude-sonnet-5",
-                           "content": [{"type": "text", "text": rng.choice(ASSISTANT_TEXT)}, tool_use]})
+        blocks: list[dict] = []
+        if think_plants:
+            p = think_plants[0]
+            blocks.append({"type": "thinking", "signature": _rs(rng, 40),
+                           "thinking": f"The config the user shared contains {p.embed} which I should reference carefully."})
+        blocks += [{"type": "text", "text": rng.choice(ASSISTANT_TEXT)}, tool_use]
+        emit("assistant", {"role": "assistant", "model": "claude-sonnet-5", "content": blocks})
+        for p in think_plants[:1]:
+            label(p)
         for p in write_plants[:1]:
             label(p)
 
@@ -377,7 +412,10 @@ def build_session(
     return lines, labels
 
 
-def generate(out: Path, n_sessions: int, seed: int) -> dict:
+BENIGN_SHARE = 0.3  # of all plants; split evenly between the "seen" and "heldout" vocabularies
+
+
+def generate(out: Path, n_sessions: int, seed: int, benign_share: float = BENIGN_SHARE) -> dict:
     rng = random.Random(seed)
     out.mkdir(parents=True, exist_ok=True)
     for stale in out.rglob("*.jsonl"):
@@ -393,19 +431,23 @@ def generate(out: Path, n_sessions: int, seed: int) -> dict:
     }
 
     counts = [rng.choice([0, 1, 1, 2, 2, 3]) for _ in range(n_sessions)]
-    pool = CATEGORIES[:]
+    total = sum(counts)
+    n_benign = round(total * benign_share)
+    confirmed = CATEGORIES[:]
+    rng.shuffle(confirmed)
+    while len(confirmed) < total - n_benign:
+        confirmed.append(rng.choice(CATEGORIES))
+    pool: list[tuple[str, str]] = [(c, "confirmed") for c in confirmed[: total - n_benign]]
+    pool += [(rng.choice(BENIGN_CAPABLE), "seen" if i % 2 == 0 else "heldout") for i in range(n_benign)]
     rng.shuffle(pool)
-    while len(pool) < sum(counts):
-        pool.append(rng.choice(CATEGORIES))
-    pool = pool[: sum(counts)]
 
     base = datetime(2026, 8, 1, 9, 0, tzinfo=timezone.utc)
     for i, n in enumerate(counts):
         project = rng.choice(PROJECTS)
         session_id = str(uuid.UUID(int=rng.getrandbits(128), version=4))
-        categories, pool = pool[:n], pool[n:]
+        specs, pool = pool[:n], pool[n:]
         start = base + timedelta(days=i, minutes=rng.randint(0, 600))
-        lines, labels = build_session(rng, project, session_id, start, categories)
+        lines, labels = build_session(rng, project, session_id, start, specs)
 
         cwd = lines[0]["cwd"]
         path = out / cwd.replace("/", "-") / f"{session_id}.jsonl"

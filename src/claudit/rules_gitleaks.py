@@ -16,7 +16,8 @@ from pathlib import Path
 from .detect import Rule, shannon_entropy
 
 RULES_PATH = Path(__file__).parent / "rules" / "gitleaks.toml"
-SKIP = {"generic-api-key", "private-key", "jwt"}
+# Rules claudit covers with tuned versions of its own; hashicorp-tf-password is a generic `password = "..."` matcher.
+SKIP = {"generic-api-key", "private-key", "jwt", "hashicorp-tf-password"}
 PRIORITY = 60
 _MID_FLAG = re.compile(r"(?<!^)\(\?i\)")
 
@@ -81,9 +82,16 @@ def load_gitleaks_rules(path: Path = RULES_PATH) -> tuple[list[Rule], list[str]]
             continue
 
         allow_res = list(global_res)
+        match_res: list[re.Pattern[str]] = []
         stopwords = list(global_stops)
         for a in r.get("allowlists", []) or ([r["allowlist"]] if "allowlist" in r else []):
-            allow_res += [p for p in (_compile(x) for x in a.get("regexes", [])) if p]
+            if a.get("paths") and not a.get("regexes") and not a.get("stopwords"):
+                continue  # path-only allowlists: claudit scans transcripts, not repositories
+            compiled = [p for p in (_compile(x) for x in a.get("regexes", [])) if p]
+            if a.get("regexTarget") == "match":
+                match_res += compiled
+            else:
+                allow_res += compiled
             stopwords += list(a.get("stopwords", []))
 
         rules.append(
@@ -96,6 +104,7 @@ def load_gitleaks_rules(path: Path = RULES_PATH) -> tuple[list[Rule], list[str]]
                 validate=_validator(r.get("entropy"), allow_res, stopwords),
                 keywords=tuple(k.lower() for k in r.get("keywords", [])),
                 source="gitleaks",
+                validate_match=(lambda m, _res=match_res: not any(p.search(m.group(0)) for p in _res)) if match_res else None,
             )
         )
     return rules, failed
