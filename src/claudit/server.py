@@ -121,6 +121,27 @@ def create_app(
             for fid, ts, sev, cat, prev, src, proj, sid, path, verdict, jmodel, reason in rows
         ]
 
+    @app.get("/api/secrets")
+    def secrets(state: str = "open"):
+        from .secrets import list_secrets
+
+        with lock:
+            return list_secrets(con, None if state == "all" else state)
+
+    @app.post("/api/secrets/{fingerprint}/state")
+    def secret_state(fingerprint: str, body: dict):
+        from .secrets import STATES, set_state
+
+        state = body.get("state")
+        if state not in STATES:
+            raise HTTPException(400, f"state must be one of {STATES}")
+        with lock:
+            try:
+                fp = set_state(con, fingerprint, state, body.get("note"))
+            except LookupError as e:
+                raise HTTPException(404, str(e))
+        return {"fingerprint": fp, "state": state}
+
     @app.post("/api/scan")
     def scan():
         if not transcripts_dir.is_dir():

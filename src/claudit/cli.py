@@ -66,6 +66,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", default=DEFAULT_MODEL)
     s.add_argument("--base-url", default=DEFAULT_BASE_URL)
 
+    s = sub.add_parser("secrets", help="the checklist: one row per secret with exposure and what to do about it")
+    s.add_argument("--state", choices=["open", "rotated", "dismissed", "all"], default="open")
+    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("mark", nargs="?", help="use: secrets mark <fingerprint-prefix> <open|rotated|dismissed>")
+    s.add_argument("prefix", nargs="?")
+    s.add_argument("new_state", nargs="?", choices=["open", "rotated", "dismissed"])
+    s.add_argument("--note")
+
     s = sub.add_parser("rules", help="list the detection rules")
     s.add_argument("--all", action="store_true", help="list every rule id, not just the counts")
 
@@ -195,6 +203,34 @@ def main(argv: list[str] | None = None) -> int:
         print(summary(con))
         if args.eval:
             print("\n" + evaluate(con, Path(args.eval).expanduser()))
+        return 0
+
+    if args.cmd == "secrets":
+        from .secrets import list_secrets, set_state
+
+        if args.mark:
+            if args.mark != "mark" or not args.prefix or not args.new_state:
+                print("usage: claudit secrets mark <fingerprint-prefix> <open|rotated|dismissed> [--note ...]")
+                return 2
+            try:
+                fp = set_state(con, args.prefix, args.new_state, args.note)
+            except (LookupError, ValueError) as e:
+                print(e)
+                return 1
+            print(f"{fp[:12]}… marked {args.new_state}")
+            return 0
+        rows = list_secrets(con, None if args.state == "all" else args.state, args.limit)
+        if not rows:
+            print(f"no {args.state} secrets")
+            return 0
+        print(_table(
+            ["fingerprint", "sev", "category", "preview", "verdict", "sessions", "first seen", "last seen", "state"],
+            [(r["fingerprint"][:12], r["severity"], r["category"], r["preview"][:24], r["verdict"], r["sessions"],
+              (r["first_seen"] or "")[:10], (r["last_seen"] or "")[:10], r["state"]) for r in rows],
+        ))
+        print("\nwhat to do (top 5):")
+        for r in rows[:5]:
+            print(f"  {r['fingerprint'][:12]}  {r['category']}: {r['rotation']}")
         return 0
 
     if args.cmd == "findings":

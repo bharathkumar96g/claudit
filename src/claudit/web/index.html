@@ -46,6 +46,16 @@
 </section>
 
 <main class="layout">
+  <section class="panel wide" id="secrets-panel">
+    <div class="panel-head">
+      <span class="eyebrow">secrets to act on</span>
+      <span class="muted mono" id="secrets-count"></span>
+      <select id="secrets-state" class="mini"><option value="open">open</option><option value="rotated">rotated</option><option value="dismissed">dismissed</option><option value="all">all</option></select>
+    </div>
+    <div class="feed-head mono secrets-grid"><span>sev</span><span>category</span><span>preview</span><span>verdict</span><span>sessions</span><span>first · last seen</span><span>via</span><span>action</span></div>
+    <div id="secrets" class="feed-body"></div>
+  </section>
+
   <section class="panel feed">
     <div class="panel-head"><span class="eyebrow">live feed</span><span class="muted mono" id="table-count"></span></div>
     <div class="feed-head mono"><span>time</span><span>sev</span><span>category</span><span>preview</span><span>source</span><span>project</span><span>verdict</span></div>

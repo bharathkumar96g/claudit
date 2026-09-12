@@ -7,6 +7,9 @@ const SEV_VAR = { critical: "--crit", high: "--high", medium: "--med", low: "--l
 const state = {
   summary: null,
   findings: [],
+  secrets: [],
+  secretsState: "open",
+  secretOpen: null,
   filters: { severity: "", category: "", source: "", project: "", verdict: "", q: "" },
   expanded: null,
   job: null,
@@ -107,7 +110,9 @@ async function api(path, opts = {}) {
 
 async function load() {
   try {
-    const [summary, findings] = await Promise.all([api("/api/summary"), api("/api/findings")]);
+    const [summary, findings, secrets] = await Promise.all([
+      api("/api/summary"), api("/api/findings"), api(`/api/secrets?state=${state.secretsState}`)]);
+    state.secrets = secrets;
     state.fresh = new Set(findings.filter((f) => f.verdict && !state.seenVerdicts.has(f.id)).map((f) => f.id));
     if (state.seenVerdicts.size === 0) state.fresh.clear();
     for (const f of findings) if (f.verdict) state.seenVerdicts.add(f.id);
@@ -146,6 +151,7 @@ function render() {
   renderFilterOptions();
   const rows = filtered();
   renderHero(rows);
+  renderSecrets();
   renderCharts(rows);
   renderFeed(rows);
   renderSemantic();
@@ -214,7 +220,9 @@ function renderHero(rows) {
     ...SEVERITIES.map((s) => h("span", { class: "sev-" + s }, h("span", { class: "tag" }, s), h("b", {}, fmtInt(bySev.get(s) || 0))))
   );
 
+  const openConfirmed = state.secrets.filter((s) => s.state === "open" && s.verdict === "confirmed").length;
   const stats = [
+    ["to rotate", state.secretsState === "open" ? fmtInt(openConfirmed) : "—", "open, confirmed secrets"],
     ["critical + high", fmtInt(critHigh), rows.length ? `${Math.round((critHigh / rows.length) * 100)}% of view` : "—"],
     ["sessions affected", `${fmtInt(sessions)}`, `of ${fmtInt(t.sessions)} scanned`],
     ["model reviewed", judged ? fmtInt(judged) : "—", judged ? `${confirmed} confirmed · ${benign} benign` : "run judge"],
@@ -336,6 +344,51 @@ function renderCharts(rows) {
     }
   }
   columns($("c-timeline"), points);
+}
+
+async function setSecretState(fp, newState) {
+  try {
+    await api(`/api/secrets/${fp}/state`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ state: newState }) });
+    toast(`${fp.slice(0, 12)}… marked ${newState}`);
+    await load();
+  } catch (err) {
+    toast("could not update: " + err.message, 6000);
+  }
+}
+
+function renderSecrets() {
+  const rows = state.secrets;
+  const el = $("secrets");
+  $("secrets-count").textContent = `${rows.length} ${state.secretsState === "all" ? "" : state.secretsState} secret${rows.length === 1 ? "" : "s"}`;
+  if (!rows.length) { el.replaceChildren(h("div", { class: "empty" }, `no ${state.secretsState} secrets`)); return; }
+  const out = [];
+  for (const s of rows) {
+    const acts = h("span", { class: "acts" });
+    for (const [label, target] of [["rotated", "rotated"], ["dismiss", "dismissed"], ["reopen", "open"]]) {
+      if (target === s.state) continue;
+      acts.append(h("button", { class: "btn ghost", onclick: (e) => { e.stopPropagation(); setSecretState(s.fingerprint, target); } }, label));
+    }
+    const row = h("div", { class: "srow" + (s.state === "open" ? "" : " done"), role: "button", tabindex: 0,
+      onclick: () => { state.secretOpen = state.secretOpen === s.fingerprint ? null : s.fingerprint; renderSecrets(); } },
+      h("span", { class: "tag sev-" + s.severity }, s.severity === "critical" ? "crit" : s.severity === "medium" ? "med" : s.severity),
+      h("span", { class: "cat", title: s.category }, s.category),
+      h("span", { class: "prev", title: s.preview }, s.preview),
+      h("span", {}, h("span", { class: "pill " + (s.verdict === "unjudged" ? "unsure" : s.verdict) }, s.verdict)),
+      h("span", {}, `${s.sessions} / ${s.findings}`),
+      h("span", { class: "t" }, `${fmtDay(s.first_seen)} · ${fmtDay(s.last_seen)}`),
+      h("span", { class: "src", title: (s.sources || []).join(", ") }, (s.sources || []).join(", ")),
+      acts,
+    );
+    out.push(row);
+    if (state.secretOpen === s.fingerprint) {
+      out.push(h("div", { class: "rotation" },
+        h("div", {}, h("b", {}, "what to do: "), s.rotation),
+        h("div", { class: "muted" }, `fingerprint ${s.fingerprint}  ·  projects: ${(s.projects || []).map(shortProject).join(", ")}`),
+        s.note ? h("div", { class: "muted" }, `note: ${s.note}`) : null,
+      ));
+    }
+  }
+  el.replaceChildren(...out);
 }
 
 function shortProject(p) {
@@ -500,6 +553,7 @@ $("f-clear").addEventListener("click", () => {
   $("f-q").value = "";
   render();
 });
+$("secrets-state").addEventListener("change", (e) => { state.secretsState = e.target.value; load(); });
 $("btn-scan").addEventListener("click", runScan);
 $("btn-judge").addEventListener("click", runJudge);
 $("btn-synth").addEventListener("click", runSynth);

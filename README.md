@@ -79,6 +79,18 @@ Regex can say "this has the shape of a secret." It can't say whether it's real. 
 
 Cheap deterministic filter first, model only where judgment is needed; structured JSON output enforced by schema; temperature 0. Any Ollama model works: `--model llama3.1:8b`.
 
+## Layer 3: what to do about it
+
+Findings are grouped by fingerprint into **secrets** — one row per distinct value, with first and last seen, how many sessions and findings, which sources it entered through, and the judgment. That's the checklist:
+
+```bash
+uv run claudit secrets                         # open secrets, most urgent first, with rotation guidance
+uv run claudit secrets mark 689bf45d rotated --note "rolled 9/12"
+uv run claudit secrets --state all
+```
+
+State (`open` / `rotated` / `dismissed`) is keyed by fingerprint, so it survives a full rescan; it is the only user-authored data in the database. The dashboard's "secrets to act on" panel is the same list with buttons, and the hero counts open, confirmed secrets as "to rotate". Guidance is category-specific and deliberately link-free (console paths change; "revoke, re-issue, update consumers" doesn't). PII categories say honestly that they can't be rotated.
+
 ## How ingest works
 
 - One row per JSONL line in `events`; one row per text chunk the model saw or produced in `segments`; one row per hit in `findings`; model verdicts in `judgments` and `semantic_findings`. DuckDB, single file.

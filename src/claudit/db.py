@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS semantic_scans (
     scanned_at     TIMESTAMP NOT NULL
 );
 
+-- The only user-authored data: what was done about a secret. Keyed by fingerprint so it survives rescans.
+CREATE TABLE IF NOT EXISTS secret_state (
+    fingerprint VARCHAR PRIMARY KEY,
+    state       VARCHAR NOT NULL,
+    note        VARCHAR,
+    updated_at  TIMESTAMP NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS semantic_findings (
     id         VARCHAR PRIMARY KEY,
     segment_id VARCHAR NOT NULL,
@@ -108,6 +116,7 @@ CREATE TABLE IF NOT EXISTS semantic_findings (
 );
 """
 
+# secret_state is deliberately absent: it is user-authored and must survive a full rescan.
 TABLES = ("semantic_findings", "semantic_scans", "judgments", "findings", "segments", "events", "checkpoints")
 
 
