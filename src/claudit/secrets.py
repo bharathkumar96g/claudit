@@ -43,7 +43,7 @@ def rotation_hint(category: str) -> str:
     return f"{provider}: revoke this credential in the provider's console, issue a new one, update consumers."
 
 
-def list_secrets(con: duckdb.DuckDBPyConnection, state: str | None = "open", limit: int = 200) -> list[dict]:
+def list_secrets(con: duckdb.DuckDBPyConnection, state: str | None = "open", limit: int = 5000) -> list[dict]:
     rows = con.execute(
         """
         WITH per_secret AS (
@@ -74,6 +74,8 @@ def list_secrets(con: duckdb.DuckDBPyConnection, state: str | None = "open", lim
         for k in ("first_seen", "last_seen", "updated_at"):
             d[k] = d[k].isoformat() if isinstance(d[k], datetime) else None
         d["verdict"] = "confirmed" if d["confirmed"] else "benign" if d["benign"] else "unsure" if d["unsure"] else "unjudged"
+        # A rotated value seen again after you marked it rotated is the one signal fingerprints make free.
+        d["reappeared"] = bool(d["state"] == "rotated" and d["updated_at"] and d["last_seen"] and d["last_seen"] > d["updated_at"])
         d["rotation"] = rotation_hint(d["category"])
         out.append(d)
     return out

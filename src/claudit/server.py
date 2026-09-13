@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .db import connect, truncate_all
+from .guard.pseudonym import GUARD_CATEGORIES
 from .ingest import ScanStats, scan_dir
 from .judge import adjudicate, semantic_scan
 from .ollama import OllamaClient, OllamaError
@@ -32,6 +33,16 @@ class Job:
     log: list[str] = field(default_factory=list)
     result: dict | None = None
     error: str | None = None
+
+
+HOME = str(Path.home())
+
+
+def tilde(p: object) -> object:
+    """Paths leave the server with the home directory collapsed: the UI shows where things are, not who you are."""
+    if isinstance(p, str) and p.startswith(HOME):
+        return "~" + p[len(HOME):]
+    return p
 
 
 def _iso(v: object) -> str | None:
@@ -84,6 +95,26 @@ def create_app(
             ).fetchone()
             last_scan = con.execute("SELECT max(updated_at) FROM checkpoints").fetchone()[0]
             judged = con.execute("SELECT count(*) FROM judgments").fetchone()[0]
+            distinct, open_n, rotated, dismissed, reappeared = con.execute(
+                """WITH per AS (SELECT f.fingerprint, max(f.ts) AS last_seen FROM findings f GROUP BY f.fingerprint)
+                   SELECT count(*), count(*) FILTER (WHERE coalesce(s.state, 'open') = 'open'),
+                          count(*) FILTER (WHERE s.state = 'rotated'), count(*) FILTER (WHERE s.state = 'dismissed'),
+                          count(*) FILTER (WHERE s.state = 'rotated' AND per.last_seen > s.updated_at)
+                   FROM per LEFT JOIN secret_state s ON s.fingerprint = per.fingerprint"""
+            ).fetchone()
+            scans = con.execute("SELECT started_at FROM runs WHERE kind = 'scan' ORDER BY started_at DESC LIMIT 2").fetchall()
+            since = None
+            if scans:
+                latest = scans[0][0]
+                (new_secrets,) = con.execute(
+                    "SELECT count(*) FROM (SELECT fingerprint, min(detected_at) AS d FROM findings GROUP BY fingerprint) WHERE d >= ?",
+                    [latest],
+                ).fetchone()
+                (touched,) = con.execute("SELECT count(*) FROM checkpoints WHERE updated_at >= ?", [latest]).fetchone()
+                since = {
+                    "latest_scan_at": _iso(latest), "previous_scan_at": _iso(scans[1][0]) if len(scans) > 1 else None,
+                    "new_secrets": new_secrets, "sessions_touched": touched, "reappeared_after_rotation": reappeared,
+                }
             semantic = [
                 {"ts": _iso(ts), "kind": k, "severity": s, "summary": sm, "source": src, "project": p}
                 for ts, k, s, sm, src, p in con.execute(
@@ -95,12 +126,16 @@ def create_app(
             if eval_dir and (eval_dir / "labels.json").is_file():
                 evaluation = evaluate_data(con, eval_dir)
         return {
-            "db": str(db_path),
-            "transcripts_dir": str(transcripts_dir),
+            "db": tilde(str(db_path)),
+            "transcripts_dir": tilde(str(transcripts_dir)),
+            "transcripts_default": Path(transcripts_dir).expanduser().resolve() == (Path.home() / ".claude" / "projects").resolve(),
             "demo": demo,
             "model": model,
             "totals": {"events": events, "segments": segments, "sessions": sessions,
                        "projects": projects, "findings": findings, "judged": judged},
+            "secrets": {"distinct": distinct, "open": open_n, "rotated": rotated, "dismissed": dismissed, "reappeared": reappeared},
+            "since": since,
+            "guard_classes": sorted(GUARD_CATEGORIES),
             "last_scan": _iso(last_scan),
             "semantic": semantic,
             "evaluation": evaluation,
@@ -111,15 +146,16 @@ def create_app(
         with lock:
             rows = con.execute(
                 "SELECT f.finding_id, f.ts, f.severity, f.category, f.preview, f.source, f.project,"
-                " f.session_id, s.path, j.verdict, j.model, j.reason"
+                " f.session_id, s.path, j.verdict, j.model, j.reason, f.fingerprint, f.detected_at"
                 " FROM findings f JOIN segments s ON s.segment_id = f.segment_id"
                 " LEFT JOIN judgments j ON j.finding_id = f.finding_id"
                 " ORDER BY f.ts DESC NULLS LAST"
             ).fetchall()
         return [
             {"id": fid, "ts": _iso(ts), "severity": sev, "category": cat, "preview": prev, "source": src,
-             "project": proj, "session": sid, "path": path, "verdict": verdict, "judged_by": jmodel, "reason": reason}
-            for fid, ts, sev, cat, prev, src, proj, sid, path, verdict, jmodel, reason in rows
+             "project": tilde(proj), "session": sid, "path": tilde(path), "verdict": verdict, "judged_by": jmodel,
+             "reason": reason, "fingerprint": fp, "detected_at": _iso(det)}
+            for fid, ts, sev, cat, prev, src, proj, sid, path, verdict, jmodel, reason, fp, det in rows
         ]
 
     @app.get("/api/secrets")
@@ -127,7 +163,34 @@ def create_app(
         from .secrets import list_secrets
 
         with lock:
-            return list_secrets(con, None if state == "all" else state)
+            rows = list_secrets(con, None if state == "all" else state)
+        for r in rows:
+            r["projects"] = [tilde(x) for x in r.get("projects") or []]
+        return rows
+
+    @app.get("/api/secrets/{fingerprint}")
+    def secret_detail(fingerprint: str):
+        """Every appearance of one value, oldest first: the material for its lifetime strip."""
+        with lock:
+            rows = con.execute(
+                "SELECT f.finding_id, f.ts, f.detected_at, f.session_id, f.source, s.path, f.project, j.verdict, j.model, j.reason"
+                " FROM findings f JOIN segments s ON s.segment_id = f.segment_id"
+                " LEFT JOIN judgments j ON j.finding_id = f.finding_id"
+                " WHERE f.fingerprint = ? ORDER BY f.ts NULLS LAST",
+                [fingerprint],
+            ).fetchall()
+            st = con.execute("SELECT state, note, updated_at FROM secret_state WHERE fingerprint = ?", [fingerprint]).fetchone()
+        if not rows:
+            raise HTTPException(404, "no such secret")
+        return {
+            "fingerprint": fingerprint,
+            "state": st[0] if st else "open", "note": st[1] if st else None, "state_at": _iso(st[2]) if st else None,
+            "appearances": [
+                {"id": fid, "ts": _iso(ts), "detected_at": _iso(det), "session": sid, "source": src, "path": tilde(path),
+                 "project": tilde(proj), "verdict": verdict, "judged_by": jmodel, "reason": reason}
+                for fid, ts, det, sid, src, path, proj, verdict, jmodel, reason in rows
+            ],
+        }
 
     @app.post("/api/secrets/{fingerprint}/state")
     def secret_state(fingerprint: str, body: dict):

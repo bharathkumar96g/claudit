@@ -80,6 +80,36 @@ Regex can say "this has the shape of a secret." It can't say whether it's real. 
 
 Cheap deterministic filter first, model only where judgment is needed; structured JSON output enforced by schema; temperature 0. Any Ollama model works: `--model llama3.1:8b`.
 
+## Layer 5: a trained student of the judge
+
+The 7B judge costs 5–10 s per call. `claudit distill` trains a 0.5B student on it and measures what is lost:
+
+```bash
+uv sync --group train                                                    # mlx-lm (Apple silicon)
+uv run claudit synth --out data/distill-train --sessions 400 --seed 11   # a corpus the test set has never seen
+uv run claudit --db data/distill-train.duckdb scan --dir data/distill-train
+uv run claudit --db data/distill-train.duckdb judge --limit 1000         # the 7B teacher writes reasons
+uv run claudit --db data/distill-train.duckdb distill build              # chat-format train/valid from labels + reasons
+uv run --group train claudit distill train                               # LoRA, prompt masked, ~600 iterations
+uv run --group train claudit distill serve                               # the student behind Ollama's /api/chat, :8790
+uv run claudit --db data/test-student.duckdb judge --base-url http://127.0.0.1:8790 --model claudit-student
+uv run claudit distill compare data/test-7b.duckdb data/test-student.duckdb
+```
+
+Three decisions carry the credibility: the student is trained on the **same messages** the judge builds at
+inference (the builder imports the prompt code, it does not copy it); verdicts come from the **labels** and only the
+reason text from the teacher, so the student does not inherit the teacher's mistakes; and `build` **refuses any
+finding without a planted label**, so nothing real can reach the weights. Held-out benign wording is excluded from
+training, which is what makes the held-out column below a test of whether the concept transferred.
+
+Serving reuses the judge unchanged — routing, instruction stripping, policy, scrubbing — by speaking the three
+Ollama endpoints the client uses. The one difference is deliberate: no JSON grammar at decode time, so the
+student's unparseable-output rate is measured rather than hidden.
+
+<!-- DISTILL RESULTS -->
+
+Design note: [`docs/design/06-distilled-judge.md`](docs/design/06-distilled-judge.md).
+
 ## Layer 4: the guard — prevention
 
 ```bash
@@ -186,6 +216,7 @@ src/claudit/
   synth.py           synthetic transcript + label generator
   report.py          summary, precision/recall, judgment accuracy
   ops.py             run history, latency percentiles, health probes
+  distill.py         train/serve a 0.5B student of the judge (mlx-lm), compare table
   server.py          FastAPI app: summary/findings/secrets/scan/judge/health/metrics
   guard/             masking gateway: pseudonyms, streaming rewrite, proxy
   web/               dashboard (no build step, no external dependencies)

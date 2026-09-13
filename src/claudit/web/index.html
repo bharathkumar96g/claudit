@@ -8,76 +8,72 @@
 </head>
 <body>
 <header class="bar">
-  <div class="wordmark">claudit<span class="cursor">_</span></div>
+  <div class="wordmark">claudit</div>
   <span id="mode-badge" class="chip"></span>
-  <span class="live"><span id="live-dot" class="live-dot"></span><span id="live-text">live</span></span>
+  <span class="live"><span id="live-dot" class="live-dot"></span><span id="live-text">connected</span></span>
   <span id="guard-badge" class="chip" hidden></span>
   <div class="spacer"></div>
   <div class="actions">
-    <button id="btn-scan" class="btn accent">scan</button>
-    <button id="btn-judge" class="btn">review</button>
-    <label class="toggle"><input type="checkbox" id="opt-semantic"> semantic</label>
-    <button id="btn-synth" class="btn ghost" hidden>regen demo</button>
+    <button id="btn-scan" class="btn accent">scan transcripts</button>
+    <button id="btn-judge" class="btn">run local review</button>
+    <label class="toggle" title="Also ask the model to read prompts and file contents for sensitive information that has no pattern. Slower."><input type="checkbox" id="opt-semantic"> also read contents</label>
+    <button id="btn-synth" class="btn ghost" hidden>reset demo data</button>
   </div>
 </header>
 
 <nav class="tabs" id="tabs" aria-label="sections">
   <button class="tab" data-tab="overview">overview</button>
   <button class="tab" data-tab="secrets">secrets<span class="tab-n" id="tab-n-secrets"></span></button>
-  <button class="tab" data-tab="findings">every appearance<span class="tab-n" id="tab-n-findings"></span></button>
-  <button class="tab" data-tab="model">model<span class="tab-n" id="tab-n-model"></span></button>
-  <button class="tab" data-tab="operations">operations</button>
+  <button class="tab" data-tab="model">review<span class="tab-n" id="tab-n-model"></span></button>
+  <button class="tab" data-tab="operations">system</button>
 </nav>
 
 <section class="status" data-tab="overview">
+  <div class="since" id="since"></div>
   <div class="status-band" id="status-band"></div>
-  <div class="funnel" id="funnel"></div>
-</section>
-
-<section class="filters" data-tab="findings" id="filters">
-  <span class="eyebrow">filter</span>
-  <select id="f-severity"><option value="">severity: all</option></select>
-  <select id="f-category"><option value="">kind: all</option></select>
-  <select id="f-source"><option value="">how it got in: all</option></select>
-  <select id="f-project"><option value="">project: all</option></select>
-  <select id="f-verdict"><option value="">review: any</option></select>
-  <input id="f-q" type="search" placeholder="search preview / project">
-  <button id="f-clear" class="btn ghost small">clear</button>
 </section>
 
 <main class="layout">
+  <section class="panel" data-tab="overview" id="ledger-panel">
+    <div class="panel-head">
+      <span class="eyebrow">the life of each secret</span>
+      <span class="muted" id="ledger-sub"></span>
+    </div>
+    <div class="legend" id="ledger-legend"></div>
+    <div id="ledger"></div>
+  </section>
+
+  <section class="coverage" data-tab="overview" id="coverage"></section>
+
   <section class="two-col" data-tab="overview">
-    <section class="panel">
-      <div class="panel-head"><span class="eyebrow">needs attention</span><span class="muted" id="attention-sub"></span></div>
-      <div id="attention"></div>
-    </section>
-    <section class="panel">
-      <div class="panel-head"><span class="eyebrow">how they reached the model</span></div>
-      <div class="chart" id="c-source"></div>
-      <div class="panel-head gap-top"><span class="eyebrow">what kind</span></div>
-      <div class="chart" id="c-category"></div>
-    </section>
+    <section class="panel"><div class="panel-head"><span class="eyebrow">origin</span><span class="muted">how each appearance entered a session</span></div><div class="chart" id="c-source"></div></section>
+    <section class="panel"><div class="panel-head"><span class="eyebrow">type</span></div><div class="chart" id="c-category"></div></section>
   </section>
   <section class="panel" data-tab="overview">
-    <div class="panel-head"><span class="eyebrow">appearances per day</span><span class="muted">each time a secret showed up in a session</span></div>
+    <div class="panel-head"><span class="eyebrow">when it appeared</span><span class="muted">appearances per day</span></div>
     <div class="chart" id="c-timeline"></div>
   </section>
 
-  <section class="panel" id="secrets-panel" data-tab="secrets">
-    <div class="panel-head">
-      <span class="eyebrow">secrets</span>
-      <span class="muted mono" id="secrets-count"></span>
-      <select id="secrets-state" class="mini"><option value="open">open</option><option value="rotated">rotated</option><option value="dismissed">dismissed</option><option value="all">all</option></select>
-    </div>
-    <div class="note" id="secrets-note" hidden></div>
-    <div class="feed-head mono secrets-grid"><span>sev</span><span>kind</span><span>preview</span><span>review</span><span>sessions · seen</span><span>first · last</span><span>how it got in</span><span>action</span></div>
-    <div id="secrets" class="feed-body"></div>
+  <section class="filters" data-tab="secrets" id="filters">
+    <select id="f-severity"><option value="">severity: all</option></select>
+    <select id="f-category"><option value="">type: all</option></select>
+    <select id="f-source"><option value="">origin: all</option></select>
+    <select id="f-project"><option value="">project: all</option></select>
+    <select id="f-verdict"><option value="">review: any</option></select>
+    <input id="f-q" type="search" placeholder="search">
+    <button id="f-clear" class="btn ghost small">clear</button>
+    <span class="spacer"></span>
+    <select id="secrets-state" class="mini"><option value="open">open</option><option value="rotated">rotated</option><option value="dismissed">dismissed</option><option value="all">all states</option></select>
+    <span class="seg" id="view-toggle"><button class="segbtn active" data-view="grouped">by secret</button><button class="segbtn" data-view="flat">every appearance</button></span>
   </section>
 
-  <section class="panel feed" data-tab="findings">
-    <div class="panel-head"><span class="eyebrow">every appearance</span><span class="muted mono" id="table-count"></span></div>
-    <div class="feed-head mono"><span>seen</span><span>sev</span><span>kind</span><span>preview</span><span>how it got in</span><span>project</span><span>review</span></div>
-    <div id="feed" class="feed-body"></div>
+  <section class="panel" id="secrets-panel" data-tab="secrets">
+    <div class="panel-head"><span class="eyebrow" id="secrets-title">secrets</span><span class="muted mono" id="secrets-count"></span></div>
+    <div class="note" id="secrets-note" hidden></div>
+    <div class="feed-head mono secrets-grid" id="secrets-head"><span>severity</span><span>type</span><span>preview</span><span>review</span><span>sessions · times</span><span>first · last seen</span><span>origin</span><span>action</span></div>
+    <div id="secrets" class="feed-body"></div>
+    <div class="feed-head mono" id="feed-head" hidden><span>seen</span><span>severity</span><span>type</span><span>preview</span><span>origin</span><span>project</span><span>review</span></div>
+    <div id="feed" class="feed-body" hidden></div>
   </section>
 
   <section class="panel" id="model-empty" data-tab="model" hidden>
@@ -92,36 +88,39 @@
 
   <section class="panel" id="models-card" data-tab="model" hidden>
     <div class="panel-head"><span class="eyebrow">models that have reviewed this database</span><span class="muted">latency per call, from stored verdicts</span></div>
-    <div class="table-wrap"><table id="models"><thead><tr><th>model</th><th class="num">calls</th><th class="num">p50 ms</th><th class="num">p95 ms</th><th class="num">confirmed</th><th class="num">benign</th><th class="num">unsure</th><th class="num">unparseable</th></tr></thead><tbody></tbody></table></div>
+    <div class="table-wrap"><table id="models"><thead><tr><th>model</th><th class="num">calls</th><th class="num">p50 ms</th><th class="num">p95 ms</th><th class="num">likely real</th><th class="num">likely fake</th><th class="num">needs you</th><th class="num">model errors</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section class="panel" id="semantic-card" data-tab="model" hidden>
-    <div class="panel-head"><span class="eyebrow">sensitive content without a pattern</span><span class="muted">model-found</span></div>
-    <div class="table-wrap"><table id="semantic"><thead><tr><th>when</th><th>kind</th><th>sev</th><th>summary</th><th>project</th></tr></thead><tbody></tbody></table></div>
+    <div class="panel-head"><span class="eyebrow">sensitive content without a pattern</span><span class="muted">found by the model while reading contents</span></div>
+    <div class="table-wrap"><table id="semantic"><thead><tr><th>when</th><th>kind</th><th>severity</th><th>summary</th><th>project</th></tr></thead><tbody></tbody></table></div>
   </section>
 
   <section class="panel" id="eval-card" data-tab="model" hidden>
     <div class="panel-head"><span class="eyebrow">evaluation against planted secrets</span><span class="muted" id="eval-sub"></span></div>
     <div class="eval-grid">
-      <div><div class="subhead">detection</div><div class="table-wrap"><table id="eval-detect"><thead><tr><th>category</th><th class="num">tp</th><th class="num">fp</th><th class="num">fn</th><th class="num">precision</th><th class="num">recall</th><th class="num">f1</th></tr></thead><tbody></tbody></table></div></div>
-      <div id="eval-judge-wrap"><div class="subhead">model judgment <span class="muted" id="eval-acc"></span></div><div class="table-wrap"><table id="eval-judge"><thead><tr><th>expected</th><th class="num">confirmed</th><th class="num">benign</th><th class="num">unsure</th><th class="num">unavailable</th><th class="num">not judged</th></tr></thead><tbody></tbody></table></div></div>
+      <div><div class="subhead">detection</div><div class="table-wrap"><table id="eval-detect"><thead><tr><th>type</th><th class="num">tp</th><th class="num">fp</th><th class="num">fn</th><th class="num">precision</th><th class="num">recall</th><th class="num">f1</th></tr></thead><tbody></tbody></table></div></div>
+      <div id="eval-judge-wrap"><div class="subhead">model review <span class="muted" id="eval-acc"></span></div><div class="table-wrap"><table id="eval-judge"><thead><tr><th>planted as</th><th class="num">likely real</th><th class="num">likely fake</th><th class="num">needs you</th><th class="num">model offline</th><th class="num">unreviewed</th></tr></thead><tbody></tbody></table></div></div>
     </div>
   </section>
 
   <section class="panel" id="ops-panel" data-tab="operations">
-    <div class="panel-head"><span class="eyebrow">operations</span><span class="muted mono" id="ops-sub"></span></div>
-    <div class="ops-grid">
-      <div id="ops-config"></div>
-      <div id="ops-health"></div>
-      <div id="ops-guard"></div>
-      <div id="ops-latency"></div>
-      <div id="ops-runs"></div>
-    </div>
+    <div class="panel-head"><span class="eyebrow">system</span><span class="muted">everything below runs on this machine</span></div>
+    <div id="sys-rows"></div>
+    <details class="details">
+      <summary>details · latency, runs, storage</summary>
+      <div class="ops-grid">
+        <div id="ops-config"></div>
+        <div id="ops-guard"></div>
+        <div id="ops-latency"></div>
+        <div id="ops-runs"></div>
+      </div>
+    </details>
   </section>
 
   <footer class="privacy">
     <span class="eyebrow">privacy</span>
-    nothing on this screen is a secret · detection runs before storage · only a fingerprint and a masked preview are kept · the model runs on this machine · the server binds to localhost and has no endpoint for raw values
+    every value on this screen is masked · detection runs before anything is stored · only a fingerprint and a masked preview are kept · the model runs on this machine · the server binds to localhost and has no endpoint for raw values
   </footer>
 </main>
 

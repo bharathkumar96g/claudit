@@ -80,3 +80,25 @@ def test_judge_job_surfaces_unreachable_ollama(tmp_path):
 def test_synth_is_refused_outside_demo_mode(tmp_path):
     client, _ = _client(tmp_path)
     assert client.post("/api/synth", headers=POST).status_code == 403
+
+
+def test_summary_secret_counts_since_and_detail_endpoint(tmp_path):
+    from claudit.synth import generate
+
+    transcripts = tmp_path / "t"
+    generate(transcripts, n_sessions=6, seed=2)
+    app = create_app(tmp_path / "t.duckdb", transcripts, None, "http://127.0.0.1:9", "m", demo=False)
+    client = TestClient(app, base_url="http://127.0.0.1")
+    assert client.post("/api/scan", headers=POST).status_code == 200
+    s = client.get("/api/summary").json()
+    assert s["secrets"]["distinct"] > 0 and s["secrets"]["open"] == s["secrets"]["distinct"]
+    assert s["since"]["new_secrets"] == s["secrets"]["distinct"] and s["since"]["previous_scan_at"] is None
+    assert "private_key" in s["guard_classes"] and not s["transcripts_dir"].startswith("/Users")
+    f = client.get("/api/findings").json()[0]
+    assert f["fingerprint"] and f["detected_at"]
+    d = client.get(f"/api/secrets/{f['fingerprint']}").json()
+    assert d["state"] == "open" and d["appearances"][0]["source"]
+    assert client.get("/api/secrets/nope").status_code == 404
+    # mark rotated, then a value seen later than the mark counts as reappeared
+    assert client.post(f"/api/secrets/{f['fingerprint'][:12]}/state", json={"state": "rotated"}, headers=POST).status_code == 200
+    assert client.get("/api/summary").json()["secrets"]["rotated"] == 1

@@ -57,6 +57,10 @@ v5→v7 is the price of the injection defence: the eight held-out plants that v5
 comment are now *unsure*, because the same comment could have been written by an attacker. Zero real secrets
 are dismissed under v7; one was under v5.
 
+### Distilled student (Qwen2.5-0.5B-Instruct-4bit + LoRA, prompt masked)
+
+<!-- DISTILL RESULTS -->
+
 ### Known failure modes
 
 1. **Neighbouring placeholder.** A real key in a prompt next to `API_KEY=your_api_key_here` was dismissed;
