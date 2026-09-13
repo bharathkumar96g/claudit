@@ -12,6 +12,12 @@ import json
 from dataclasses import dataclass, field
 
 _REWRITABLE = {"text_delta": "text", "thinking_delta": "thinking", "input_json_delta": "partial_json"}
+FILE_WRITING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+MISS_FRAGMENT = 8  # a run this long from a pseudonym, without the whole pseudonym, means the model altered it
+BLOCKED_WRITE_MESSAGE = (
+    "claudit guard: a masked credential could not be restored inside a file-writing tool call, so the write was "
+    "blocked rather than saving a placeholder into your files. Re-run the request; see `claudit guard status`."
+)
 
 
 def _sse_event(event: str, data: dict) -> bytes:
@@ -22,17 +28,22 @@ def _sse_event(event: str, data: dict) -> bytes:
 class StreamRewriter:
     fake_to_real: dict[str, str]
     _prefixes: set[str] = field(init=False, default_factory=set)
+    _fragments: dict[str, str] = field(init=False, default_factory=dict)  # fragment -> fake
     _max_len: int = field(init=False, default=0)
     _buf: bytes = field(init=False, default=b"")
     _carry: dict[int, tuple[str, str]] = field(init=False, default_factory=dict)  # index -> (kind, held text)
+    _tools: dict[int, str] = field(init=False, default_factory=dict)  # index -> tool name for tool_use blocks
     replaced: int = 0
     suspected_misses: int = 0
+    blocked_writes: int = 0
 
     def __post_init__(self) -> None:
         for fake in self.fake_to_real:
             self._max_len = max(self._max_len, len(fake))
             for i in range(1, len(fake)):
                 self._prefixes.add(fake[:i])
+            if len(fake) > MISS_FRAGMENT:
+                self._fragments[fake[:MISS_FRAGMENT]] = fake
 
     # --- SSE framing -------------------------------------------------------------------------------------
 
@@ -73,19 +84,28 @@ class StreamRewriter:
                 event = line[6:].strip()
             elif line.startswith("data:"):
                 data = line[5:].strip()
-        if data is None or event not in ("content_block_delta", "content_block_stop", "message_stop"):
+        if data is None or event not in ("content_block_start", "content_block_delta", "content_block_stop", "message_stop"):
             return raw
         try:
             payload = json.loads(data)
         except json.JSONDecodeError:
             return raw
 
+        if event == "content_block_start":
+            block = payload.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                self._tools[int(payload.get("index", 0))] = str(block.get("name") or "")
+            return raw
         if event == "content_block_stop":
             return self._flush(int(payload.get("index", 0))) + raw
         if event == "message_stop":
             out = bytearray()
             for index in list(self._carry):
                 out += self._flush(index)
+            if self.blocked_writes:
+                # Fail closed: a placeholder inside a file write is an outage, not a leak, and must not be silent.
+                out += _sse_event("error", {"type": "error", "error": {"type": "claudit_guard_blocked_write",
+                                                                        "message": BLOCKED_WRITE_MESSAGE}})
             return bytes(out) + raw
 
         delta = payload.get("delta") or {}
@@ -97,7 +117,7 @@ class StreamRewriter:
         held = self._carry.get(index, (kind, ""))[1]
         combined = held + delta[key]
         emit, keep = self._split(combined)
-        emit = self._replace(emit, escaped=(kind == "input_json_delta"))
+        emit = self._replace(emit, escaped=(kind == "input_json_delta"), index=index)
         self._carry[index] = (kind, keep) if keep else (kind, "")
         if not keep:
             self._carry.pop(index, None)
@@ -112,8 +132,9 @@ class StreamRewriter:
         if not held or kind is None:
             return b""
         key = _REWRITABLE[kind]
+        text = self._replace(held, escaped=(kind == "input_json_delta"), index=index)
         return _sse_event("content_block_delta", {"type": "content_block_delta", "index": index,
-                                                  "delta": {"type": kind, key: self._replace(held, escaped=(kind == "input_json_delta"))}})
+                                                  "delta": {"type": kind, key: text}})
 
     # --- text --------------------------------------------------------------------------------------------
 
@@ -125,11 +146,18 @@ class StreamRewriter:
                 return s[:-k], s[-k:]
         return s, ""
 
-    def _replace(self, s: str, escaped: bool) -> str:
+    def _replace(self, s: str, escaped: bool, index: int | None = None) -> str:
         if not s:
             return s
         for fake, real in self.fake_to_real.items():
             if fake in s:
                 self.replaced += s.count(fake)
                 s = s.replace(fake, json.dumps(real, ensure_ascii=False)[1:-1] if escaped else real)
+        # Whatever is left that starts like a pseudonym is one the model altered: it stays a pseudonym
+        # (never a leak) and is counted; inside a file-writing tool call it also blocks the write.
+        for fragment in self._fragments:
+            if fragment in s:
+                self.suspected_misses += 1
+                if index is not None and self._tools.get(index) in FILE_WRITING_TOOLS:
+                    self.blocked_writes += 1
         return s

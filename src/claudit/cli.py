@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("new_state", nargs="?", choices=["open", "rotated", "dismissed"])
     s.add_argument("--note")
 
+    s = sub.add_parser("guard", help="local masking gateway between Claude Code and the model provider")
+    s.add_argument("action", nargs="?", choices=["run", "status"], default="run")
+    s.add_argument("--port", type=int, default=8787)
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--upstream", default="https://api.anthropic.com")
+
     s = sub.add_parser("memory", help="example memory for retrieval-augmented judging")
     s.add_argument("action", choices=["build", "add-verdicts", "stats"])
     s.add_argument("--from", dest="from_dir", default="data/synthetic", help="synthetic dir with labels.json (build)")
@@ -201,6 +207,33 @@ def main(argv: list[str] | None = None) -> int:
               f"   dismissal rate {res.dismissal_rate:.2f}")
         for verdict, injection, category, reason in res.examples:
             print(f"  {verdict.upper():9} {category:20} by: {injection[:70]}\n            reason: {reason}")
+        return 0
+
+    if args.cmd == "guard":
+        import urllib.request
+
+        from .guard.proxy import LOOPBACK_HOSTS as GUARD_LOOPBACK
+        from .guard.proxy import create_guard_app, env_hint
+
+        if args.action == "status":
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{args.port}/guard/status", timeout=5) as r:  # nosec B310 - fixed loopback URL
+                    print(r.read().decode())
+            except OSError as e:
+                print(f"guard not reachable on port {args.port}: {e}")
+                return 1
+            return 0
+        if not args.upstream.startswith("https://"):
+            print("refusing: upstream must be https")
+            return 1
+        allowed = GUARD_LOOPBACK if args.host in ("127.0.0.1", "localhost", "::1") else None
+        app = create_guard_app(args.upstream, allowed_hosts=allowed)
+        print(f"claudit guard listening on http://{args.host}:{args.port} -> {args.upstream}")
+        print("masking: vendor-format keys, private keys, connection-string passwords. No bodies are logged.\n")
+        print(env_hint(args.port))
+        from .server import serve
+
+        serve(app, args.host, args.port)
         return 0
 
     if args.cmd == "serve":
