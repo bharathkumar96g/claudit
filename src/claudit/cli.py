@@ -11,6 +11,7 @@ from .db import connect, truncate_all
 from .ingest import ScanStats, scan_dir
 from .judge import adjudicate, semantic_scan
 from .ollama import DEFAULT_BASE_URL, DEFAULT_EMBED_MODEL, DEFAULT_MODEL, OllamaClient, OllamaUnavailableError
+from .ops import timed_run
 from .report import _table, evaluate, summary
 from .reveal import reveal_finding
 from .synth import generate
@@ -68,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--demo", action="store_true", help="demo mode: scan the synthetic dir and allow regenerating it")
     s.add_argument("--model", default=DEFAULT_MODEL)
     s.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    s.add_argument("--guard-port", type=int, default=8787, help="where the dashboard looks for `claudit guard`")
 
     s = sub.add_parser("secrets", help="the checklist: one row per secret with exposure and what to do about it")
     s.add_argument("--state", choices=["open", "rotated", "dismissed", "all"], default="open")
@@ -99,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="list every rule id, not just the counts")
 
     sub.add_parser("reset", help="delete all ingested data and checkpoints")
+
+    s = sub.add_parser("ops", help="health probes, run history and latency percentiles")
+    s.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    s.add_argument("--guard-port", type=int, default=8787)
     return p
 
 
@@ -146,11 +152,14 @@ def _cmd_judge(con, args) -> int:
         con.execute("DELETE FROM judgments")
     if not args.semantic_only:
         print("Reviewing flagged findings" + (" with retrieved examples" if args.rag else ""))
-        stats = adjudicate(
-            con, client, args.model, args.limit,
-            on_result=lambda cat, prev, verdict, reason: print(f"  {verdict:11} {cat:22} {prev:20} {reason[:60]}"),
-            retriever=retriever,
-        )
+        holder: list = []
+        with timed_run(con, "judge", holder):
+            stats = adjudicate(
+                con, client, args.model, args.limit,
+                on_result=lambda cat, prev, verdict, reason: print(f"  {verdict:11} {cat:22} {prev:20} {reason[:60]}"),
+                retriever=retriever,
+            )
+            holder.append(stats)
         print(
             f"model-judged {stats.judged}   confirmed-by-rule {stats.routed}   confirmed {stats.confirmed}"
             f"   benign {stats.benign}   unsure {stats.unsure}   unavailable {stats.unavailable}"
@@ -159,11 +168,14 @@ def _cmd_judge(con, args) -> int:
         )
 
     if args.semantic or args.semantic_only:
-        print("\nScanning prompts for sensitive content without a pattern")
-        sstats = semantic_scan(
-            con, client, args.model, args.semantic_limit,
-            on_result=lambda source, n: print(f"  {source:12} {n} finding(s)") if n else None,
-        )
+        print("\nScanning prompts and files for sensitive content without a pattern")
+        sholder: list = []
+        with timed_run(con, "semantic", sholder):
+            sstats = semantic_scan(
+                con, client, args.model, args.semantic_limit,
+                on_result=lambda source, n: print(f"  {source:12} {n} finding(s)") if n else None,
+            )
+            sholder.append(sstats)
         print(
             f"scanned {sstats.scanned} segments   findings {sstats.findings}"
             f"   tokens in/out {sstats.prompt_tokens}/{sstats.output_tokens}   {sstats.duration_ms / 1000:.1f}s model time"
@@ -245,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         from .server import LOOPBACK_HOSTS
 
         allowed = LOOPBACK_HOSTS if args.host in ("127.0.0.1", "localhost", "::1") else None
-        app = create_app(db_path, transcripts, eval_dir, args.base_url, args.model, demo=args.demo, allowed_hosts=allowed)
+        app = create_app(db_path, transcripts, eval_dir, args.base_url, args.model, demo=args.demo,
+                         allowed_hosts=allowed, guard_port=args.guard_port)
         print(f"claudit UI at http://{args.host}:{args.port}  (db {db_path}, scanning {transcripts})")
         serve(app, args.host, args.port)
         return 0
@@ -278,6 +291,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cleared {db_path}")
         return 0
 
+    if args.cmd == "ops":
+        from .ops import health, latency, recent_runs
+
+        h = health(con, args.base_url, args.guard_port)
+        dot = lambda ok: "ok " if ok else "DOWN"  # noqa: E731
+        print(f"db      {dot(h['db']['ok'])}")
+        print(f"ollama  {dot(h['ollama']['ok'])}  {h['ollama'].get('ms', '')} ms  {h['ollama'].get('error', '')}")
+        g = h["guard"]
+        print(f"guard   {dot(g['ok'])}  " + (f"masked {g['status']['values_masked']}  restored {g['status']['values_restored']}"
+                                            f"  misses {g['status']['suspected_misses']}  blocked writes {g['status']['blocked_writes']}"
+                                            if g.get("status") else "not running"))
+        lat = latency(con)
+        print(f"\njudge calls      n {lat['judge_calls']['n']:<5} p50 {lat['judge_calls']['p50_ms']} ms   p95 {lat['judge_calls']['p95_ms']} ms")
+        print(f"semantic segs    n {lat['semantic_segments']['n']:<5} p50 {lat['semantic_segments']['p50_ms']} ms   p95 {lat['semantic_segments']['p95_ms']} ms")
+        print(f"scans            n {lat['scans']['n']:<5} p50 {lat['scans']['p50_ms']} ms   max {lat['scans']['max_ms']} ms")
+        runs = recent_runs(con, 10)
+        if runs:
+            print("\nrecent runs")
+            print(_table(["when", "kind", "ms", "summary"],
+                         [(r["started_at"][:19], r["kind"], r["duration_ms"],
+                           ", ".join(f"{k}={v}" for k, v in list(r["stats"].items())[:5] if not isinstance(v, dict))) for r in runs]))
+        return 0
+
     if args.cmd == "scan":
         root = Path(args.dir).expanduser() if args.dir else cfg.transcripts_dir
         if not root.is_dir():
@@ -286,7 +322,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.full:
             truncate_all(con)
         stats = ScanStats()
-        scan_dir(con, root, stats)
+        holder: list = []
+        with timed_run(con, "scan", holder):
+            scan_dir(con, root, stats)
+            holder.append(stats)
         print(
             f"scanned {root}\n"
             f"files {stats.files}   new lines {stats.lines}   events {stats.events}   "

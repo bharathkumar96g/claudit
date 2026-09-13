@@ -52,6 +52,7 @@ def create_app(
     model: str,
     demo: bool,
     allowed_hosts: frozenset[str] | None = LOOPBACK_HOSTS,
+    guard_port: int = 8787,
 ) -> FastAPI:
     con = connect(db_path)
     lock = threading.Lock()
@@ -142,13 +143,31 @@ def create_app(
                 raise HTTPException(404, str(e)) from e
         return {"fingerprint": fp, "state": state}
 
+    @app.get("/api/health")
+    def health_endpoint():
+        from .ops import health
+
+        with lock:
+            return health(con, ollama_url, guard_port)
+
+    @app.get("/api/metrics")
+    def metrics():
+        from .ops import latency, recent_runs
+
+        with lock:
+            return {"latency": latency(con), "runs": recent_runs(con)}
+
     @app.post("/api/scan")
     def scan():
+        from .ops import timed_run
+
         if not transcripts_dir.is_dir():
             raise HTTPException(400, f"no such directory: {transcripts_dir}")
         stats = ScanStats()
-        with lock:
+        holder: list = []
+        with lock, timed_run(con, "scan", holder):
             scan_dir(con, transcripts_dir, stats)
+            holder.append(stats)
         return asdict(stats)
 
     @app.post("/api/synth")
@@ -170,6 +189,8 @@ def create_app(
         jobs[job.id] = job
 
         def run() -> None:
+            from .ops import timed_run
+
             cur = con.cursor()
             try:
                 client = OllamaClient(ollama_url)
@@ -180,17 +201,23 @@ def create_app(
                 job.log.append(f"Ollama {version}, model {model}")
                 if rejudge:
                     cur.execute("DELETE FROM judgments")
-                stats = adjudicate(
-                    cur, client, model,
-                    on_result=lambda cat, prev, verdict, reason: job.log.append(f"{verdict:11} {cat:22} {prev}"),
-                )
+                holder: list = []
+                with timed_run(cur, "judge", holder):
+                    stats = adjudicate(
+                        cur, client, model,
+                        on_result=lambda cat, prev, verdict, reason: job.log.append(f"{verdict:11} {cat:22} {prev}"),
+                    )
+                    holder.append(stats)
                 result = {"judge": asdict(stats)}
                 if semantic:
-                    job.log.append("scanning prompts for pattern-less sensitive content")
-                    sstats = semantic_scan(
-                        cur, client, model,
-                        on_result=lambda source, n: job.log.append(f"semantic {source}: {n} finding(s)") if n else None,
-                    )
+                    job.log.append("scanning prompts and files for pattern-less sensitive content")
+                    sholder: list = []
+                    with timed_run(cur, "semantic", sholder):
+                        sstats = semantic_scan(
+                            cur, client, model,
+                            on_result=lambda source, n: job.log.append(f"semantic {source}: {n} finding(s)") if n else None,
+                        )
+                        sholder.append(sstats)
                     result["semantic"] = asdict(sstats)
                 job.result = result
                 job.status = "done"

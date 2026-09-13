@@ -110,6 +110,19 @@ uv run claudit secrets --state all
 
 State (`open` / `rotated` / `dismissed`) is keyed by fingerprint, so it survives a full rescan; it is the only user-authored data in the database. The dashboard's "secrets to act on" panel is the same list with buttons, and the hero counts open, confirmed secrets as "to rotate". Guidance is category-specific and deliberately link-free (console paths change; "revoke, re-issue, update consumers" doesn't). PII categories say honestly that they can't be rotated.
 
+## Operations
+
+Every scan, judge and semantic run is recorded in a `runs` table (kind, start, duration, counts — never content). The dashboard's operations panel and `claudit ops` read the same numbers:
+
+```bash
+uv run claudit ops                             # health probes, latency percentiles, recent runs
+curl -s localhost:8765/api/health              # db / ollama / guard reachability, with round-trip ms
+curl -s localhost:8765/api/metrics             # judge p50/p95 per model call, semantic p50/p95, scan history
+CLAUDIT_LOG=json uv run claudit scan DIR       # one JSON line per run on stderr, for whatever collects logs
+```
+
+Percentiles come from DuckDB `quantile_cont` over the per-call latency stored with each verdict, so "the judge got slow" is a query, not a feeling. [`docs/runbook.md`](docs/runbook.md) lists what each failure looks like and what to do; [`docs/design/05-observability.md`](docs/design/05-observability.md) is the design note.
+
 ## How ingest works
 
 - One row per JSONL line in `events`; one row per text chunk the model saw or produced in `segments`; one row per hit in `findings`; model verdicts in `judgments` and `semantic_findings`. DuckDB, single file.
@@ -150,27 +163,34 @@ The eval has already paid for itself: it caught a bug where JSON-escaping tool i
 
 ## Roadmap
 
-- **dbt models + Dagster orchestration** on top of the same DuckDB file, so the marts are declared, tested, and scheduled.
-- **Model comparison**: the same eval across two or three local models — accuracy, latency per call, memory.
-- **More sources**: claude.ai data export; local logs from self-hosted agents (OpenClaw, Hermes).
-- **Prompt-quality scoring**: friction signals already in the transcripts (turns to resolution, correction phrases, interruptions, rework) to find sessions that went badly, then have the local model explain why and rewrite the opening prompt.
-- **Semantic search** over redacted history with a local embedding model and DuckDB `vss`.
-- **File watcher** for near-real-time scanning; dashboard; static synthetic-data demo.
+- **Model comparison**: the same eval across two or three local models — accuracy, latency per call, memory. Parked until a second model is worth the download.
+- **More sources**: claude.ai data export; Cursor and other tools that keep local logs.
+- **Coaching, not scoring**: cross-tool suggestions for prompts that wasted tokens or looped (rework, corrections, interruptions). Explicitly not a rating of the person.
+- **Semantic search** over redacted history with the embedding model already used by the RAG experiment.
+- **File watcher** for near-real-time scanning.
 
 ## Layout
 
 ```
 src/claudit/
-  detect.py   rules, validators, overlap resolution, masking
-  ingest.py   JSONL parsing, segment extraction, checkpointing
-  judge.py    adjudication + semantic scan via local model
-  ollama.py   minimal Ollama HTTP client
-  reveal.py   re-read raw text from source transcripts, hash-verified
-  synth.py    synthetic transcript + label generator
-  report.py   summary, precision/recall, judgment accuracy
-  server.py   FastAPI app: summary/findings/scan/judge endpoints
-  web/        dashboard (no build step, no external dependencies)
-  db.py       schema
+  detect.py          rules, validators, overlap resolution, masking
+  rules_gitleaks.py  loader for the vendored gitleaks rule set (rules/gitleaks.toml, MIT)
+  ingest.py          JSONL parsing, segment extraction, checkpointing
+  chunking.py        line-aware chunking for the semantic scan
+  judge.py           adjudication + semantic scan via local model; instruction stripping and policy
+  memory.py          example store + leak-controlled retrieval (the RAG experiment, off by default)
+  adversarial.py     prompt-injection eval for the judge
+  ollama.py          minimal Ollama HTTP client (chat, embed)
+  reveal.py          re-read raw text from source transcripts, hash-verified
+  secrets.py         per-fingerprint state and rotation guidance
+  synth.py           synthetic transcript + label generator
+  report.py          summary, precision/recall, judgment accuracy
+  ops.py             run history, latency percentiles, health probes
+  server.py          FastAPI app: summary/findings/secrets/scan/judge/health/metrics
+  guard/             masking gateway: pseudonyms, streaming rewrite, proxy
+  web/               dashboard (no build step, no external dependencies)
+  db.py              schema
   cli.py
-tests/        includes a fake Ollama server (conftest.py)
+tests/               includes a fake Ollama server and a fake Anthropic upstream
+docs/                design notes 00–05, ADRs, threat model, eval report, runbook
 ```

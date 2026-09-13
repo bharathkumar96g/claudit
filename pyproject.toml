@@ -1,9 +1,23 @@
 [project]
 name = "claudit"
 version = "0.1.0"
-description = "Local-first audit of what you've shared with Claude. Detects secrets and PII in Claude Code transcripts; stores fingerprints, never raw values."
+description = "Local-first audit and guard for what you share with AI coding tools: secret/PII detection over Claude Code transcripts (fingerprints, never values), a local-model judge, and a masking gateway."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE", "src/claudit/rules/LICENSE-gitleaks"]
+authors = [{ name = "Bharath Kumar Gandhasiri" }]
+keywords = ["security", "secrets", "privacy", "claude-code", "llm", "duckdb", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
 dependencies = [
     "duckdb>=1.5.5",
     "fastapi>=0.141.1",
@@ -13,6 +27,11 @@ dependencies = [
 
 [project.scripts]
 claudit = "claudit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bharathkumar96g/claudit"
+Documentation = "https://github.com/bharathkumar96g/claudit#readme"
+Issues = "https://github.com/bharathkumar96g/claudit/issues"
 
 [build-system]
 requires = ["uv_build>=0.8,<0.13"]

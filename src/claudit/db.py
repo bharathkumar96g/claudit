@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS semantic_scans (
     scanned_at     TIMESTAMP NOT NULL
 );
 
+-- Operational history: one row per scan / judge / semantic / adversarial run. Survives rescans.
+CREATE TABLE IF NOT EXISTS runs (
+    run_id      VARCHAR PRIMARY KEY,
+    kind        VARCHAR NOT NULL,
+    started_at  TIMESTAMP NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    stats       VARCHAR NOT NULL
+);
+
 -- The only user-authored data: what was done about a secret. Keyed by fingerprint so it survives rescans.
 CREATE TABLE IF NOT EXISTS secret_state (
     fingerprint VARCHAR PRIMARY KEY,

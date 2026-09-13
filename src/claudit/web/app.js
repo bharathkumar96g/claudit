@@ -10,6 +10,8 @@ const state = {
   secrets: [],
   secretsState: "open",
   secretOpen: null,
+  health: null,
+  metrics: null,
   filters: { severity: "", category: "", source: "", project: "", verdict: "", q: "" },
   expanded: null,
   job: null,
@@ -110,9 +112,12 @@ async function api(path, opts = {}) {
 
 async function load() {
   try {
-    const [summary, findings, secrets] = await Promise.all([
-      api("/api/summary"), api("/api/findings"), api(`/api/secrets?state=${state.secretsState}`)]);
+    const [summary, findings, secrets, health, metrics] = await Promise.all([
+      api("/api/summary"), api("/api/findings"), api(`/api/secrets?state=${state.secretsState}`),
+      api("/api/health").catch(() => null), api("/api/metrics").catch(() => null)]);
     state.secrets = secrets;
+    state.health = health;
+    state.metrics = metrics;
     state.fresh = new Set(findings.filter((f) => f.verdict && !state.seenVerdicts.has(f.id)).map((f) => f.id));
     if (state.seenVerdicts.size === 0) state.fresh.clear();
     for (const f of findings) if (f.verdict) state.seenVerdicts.add(f.id);
@@ -156,6 +161,48 @@ function render() {
   renderFeed(rows);
   renderSemantic();
   renderEval();
+  renderOps();
+}
+
+function renderOps() {
+  const hz = state.health, m = state.metrics;
+  if (!hz) { $("ops-panel").hidden = true; return; }
+  $("ops-panel").hidden = false;
+  const dot = (ok) => h("span", { class: "hdot " + (ok ? "ok" : "down") });
+  const row = (k, v) => h("div", { class: "ops-row" }, h("span", {}, k), h("span", { class: "v" }, v));
+  const fill = (id, ...kids) => $(id).replaceChildren(...kids.flat().filter((c) => c !== null && c !== undefined));
+
+  fill("ops-health",
+    h("div", { class: "k" }, "health"),
+    row(h("span", {}, dot(hz.db.ok), "database"), hz.db.ok ? "ok" : "down"),
+    row(h("span", {}, dot(hz.ollama.ok), "ollama"), hz.ollama.ok ? `${hz.ollama.ms} ms` : "unreachable"),
+    row(h("span", {}, dot(hz.guard.ok), "guard"), hz.guard.ok ? `${hz.guard.ms} ms` : "not running"),
+  );
+
+  const g = hz.guard.status;
+  fill("ops-guard",
+    h("div", { class: "k" }, "guard · kept on this machine"),
+    h("div", { class: "ops-big" }, g ? fmtInt(g.values_masked) : "—"),
+    g ? row("restored in replies", fmtInt(g.values_restored)) : h("div", { class: "muted" }, "start with: claudit guard"),
+    g ? row("suspected misses", fmtInt(g.suspected_misses)) : null,
+    g ? row("blocked writes", fmtInt(g.blocked_writes)) : null,
+  );
+
+  const lat = m && m.latency;
+  fill("ops-latency",
+    h("div", { class: "k" }, "latency"),
+    lat ? row("judge p50 / p95", lat.judge_calls.n ? `${lat.judge_calls.p50_ms} / ${lat.judge_calls.p95_ms} ms  (n ${lat.judge_calls.n})` : "—") : null,
+    lat ? row("semantic p50 / p95", lat.semantic_segments.n ? `${lat.semantic_segments.p50_ms} / ${lat.semantic_segments.p95_ms} ms  (n ${lat.semantic_segments.n})` : "—") : null,
+    lat ? row("scan p50 / max", lat.scans.n ? `${lat.scans.p50_ms} / ${lat.scans.max_ms} ms  (n ${lat.scans.n})` : "—") : null,
+  );
+
+  const runs = (m && m.runs) || [];
+  fill("ops-runs",
+    h("div", { class: "k" }, "recent runs"),
+    ...(runs.length ? runs.slice(0, 6).map((r) => row(`${fmtDay(r.started_at)} ${fmtTime(r.started_at)}  ${r.kind}`, `${fmtInt(r.duration_ms)} ms`))
+                    : [h("div", { class: "muted" }, "no runs yet")]),
+  );
+  $("ops-sub").textContent = runs.length ? `${runs.length} runs recorded` : "";
 }
 
 function renderHeader() {
