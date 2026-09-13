@@ -388,9 +388,7 @@ function renderLedger() {
     return;
   }
   const apps = new Map(top.map((x) => [x.fingerprint, appearancesOf(x.fingerprint)]));
-  const times = [...apps.values()].flat().map((a) => a.ts).filter(Boolean);
-  const axis = { min: times.length ? Math.min(...times.map((x) => asDate(x).getTime())) : Date.now() - 86400000, max: Date.now() };
-  if (axis.max - axis.min < 3 * 86400000) axis.min = axis.max - 3 * 86400000;
+  const axis = axisFor([...apps.values()].flat().map((a) => a.ts));
   const rows = top.map((x) => {
     const acts = h("span", { class: "acts" },
       h("button", { class: "btn ghost", onclick: () => setSecretState(x.fingerprint, "rotated") }, "mark rotated"),
@@ -423,8 +421,16 @@ function renderLedger() {
   requestAnimationFrame(draw);
 }
 
+// A time axis that contains every appearance and ends at "now" (or later, if a transcript is stamped ahead of the clock).
+function axisFor(timestamps) {
+  const ms = timestamps.filter(Boolean).map((x) => asDate(x).getTime());
+  const axis = { min: ms.length ? Math.min(...ms) : Date.now() - 86400000, max: Math.max(Date.now(), ...ms) };
+  if (axis.max - axis.min < 3 * 86400000) axis.min = axis.max - 3 * 86400000;
+  return axis;
+}
+
 function lifetimeStrip(container, secret, apps, axis) {
-  const W = Math.max(200, container.clientWidth || 400), H = 30, mid = 15;
+  const W = Math.max(120, container.clientWidth || 400), H = 30, mid = 15;
   const span = Math.max(1, axis.max - axis.min);
   const X = (iso) => 8 + ((asDate(iso).getTime() - axis.min) / span) * (W - 16);
   const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img" });
@@ -651,9 +657,7 @@ function renderSecrets() {
 // One secret's history: its lifetime strip, every appearance with where it sat, and what to do.
 function secretDetail(s) {
   const apps = appearancesOf(s.fingerprint);
-  const times = apps.map((a) => a.ts).filter(Boolean).map((x) => asDate(x).getTime());
-  const axis = { min: times.length ? Math.min(...times) : Date.now() - 86400000, max: Date.now() };
-  if (axis.max - axis.min < 3 * 86400000) axis.min = axis.max - 3 * 86400000;
+  const axis = axisFor(apps.map((a) => a.ts));
   const strip = h("div", { class: "detail-strip" });
   lifetimeStrip(strip, s, apps, axis);
   requestAnimationFrame(() => lifetimeStrip(strip, s, apps, axis));
