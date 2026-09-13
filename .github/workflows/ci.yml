@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks-action diffs the pushed commit range; a shallow clone lacks the base commit
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
