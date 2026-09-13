@@ -152,10 +152,10 @@ def create_app(
 
     @app.get("/api/metrics")
     def metrics():
-        from .ops import latency, recent_runs
+        from .ops import latency, latency_by_model, recent_runs
 
         with lock:
-            return {"latency": latency(con), "runs": recent_runs(con)}
+            return {"latency": latency(con), "by_model": latency_by_model(con), "runs": recent_runs(con)}
 
     @app.post("/api/scan")
     def scan():

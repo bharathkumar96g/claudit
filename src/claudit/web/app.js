@@ -194,6 +194,8 @@ function renderOps() {
     lat ? row("judge p50 / p95", lat.judge_calls.n ? `${lat.judge_calls.p50_ms} / ${lat.judge_calls.p95_ms} ms  (n ${lat.judge_calls.n})` : "—") : null,
     lat ? row("semantic p50 / p95", lat.semantic_segments.n ? `${lat.semantic_segments.p50_ms} / ${lat.semantic_segments.p95_ms} ms  (n ${lat.semantic_segments.n})` : "—") : null,
     lat ? row("scan p50 / max", lat.scans.n ? `${lat.scans.p50_ms} / ${lat.scans.max_ms} ms  (n ${lat.scans.n})` : "—") : null,
+    ((m && m.by_model) || []).map((r) =>
+      row(`· ${r.model}`, `${r.p50_ms} / ${r.p95_ms} ms  (n ${r.n}${r.unparseable ? `, ${r.unparseable} unparseable` : ""})`)),
   );
 
   const runs = (m && m.runs) || [];

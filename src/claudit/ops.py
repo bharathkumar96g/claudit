@@ -72,6 +72,23 @@ def latency(con: duckdb.DuckDBPyConnection) -> dict:
     }
 
 
+def latency_by_model(con: duckdb.DuckDBPyConnection) -> list[dict]:
+    """One row per judge model: volume, latency percentiles, verdict mix and how often its output was unparseable.
+    This is the table the distilled-student comparison reads; 'rules' rows are routing, not a model."""
+    rows = con.execute("""
+        SELECT model, count(*), quantile_cont(duration_ms, 0.5), quantile_cont(duration_ms, 0.95), avg(prompt_tokens),
+               sum(CASE WHEN verdict = 'confirmed' THEN 1 ELSE 0 END), sum(CASE WHEN verdict = 'benign' THEN 1 ELSE 0 END),
+               sum(CASE WHEN verdict = 'unsure' THEN 1 ELSE 0 END),
+               sum(CASE WHEN reason = 'model returned unparseable output' THEN 1 ELSE 0 END)
+        FROM judgments WHERE model <> 'rules' AND verdict <> 'unavailable' GROUP BY model ORDER BY count(*) DESC""").fetchall()
+    f = lambda v: None if v is None else round(float(v), 1)  # noqa: E731
+    return [
+        {"model": m, "n": int(n), "p50_ms": f(p50), "p95_ms": f(p95), "avg_prompt_tokens": f(tok),
+         "confirmed": int(c), "benign": int(b), "unsure": int(u), "unparseable": int(bad)}
+        for m, n, p50, p95, tok, c, b, u, bad in rows
+    ]
+
+
 def probe_http(url: str, timeout: float = 2.0) -> dict:
     t0 = time.perf_counter()
     try:

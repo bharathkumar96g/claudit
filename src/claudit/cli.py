@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .config import load_config
 from .db import connect, truncate_all
+from .distill import BASE_MODEL
 from .ingest import ScanStats, scan_dir
 from .judge import adjudicate, semantic_scan
 from .ollama import DEFAULT_BASE_URL, DEFAULT_EMBED_MODEL, DEFAULT_MODEL, OllamaClient, OllamaUnavailableError
@@ -84,6 +85,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--upstream", default="https://api.anthropic.com")
+
+    s = sub.add_parser("distill", help="train and serve a small local student of the 7B judge (synthetic data only)")
+    s.add_argument("action", choices=["build", "train", "serve", "compare"])
+    s.add_argument("dbs", nargs="*", help="compare: databases judged over the same synthetic set")
+    s.add_argument("--eval-dir", default="data/synthetic", help="compare: synthetic dir with labels.json")
+    s.add_argument("--labels", default="data/distill-train/labels.json", help="labels.json of the synthetic corpus (build)")
+    s.add_argument("--data", default="data/distill", help="dataset dir: train.jsonl / valid.jsonl")
+    s.add_argument("--adapters", default="data/distill/adapters")
+    s.add_argument("--base-model", default=BASE_MODEL)
+    s.add_argument("--iters", type=int, default=600)
+    s.add_argument("--num-layers", type=int, default=8)
+    s.add_argument("--port", type=int, default=8790)
+    s.add_argument("--host", default="127.0.0.1")
 
     s = sub.add_parser("memory", help="example memory for retrieval-augmented judging")
     s.add_argument("action", choices=["build", "add-verdicts", "stats"])
@@ -264,6 +278,39 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     con = connect(db_path)
+
+    if args.cmd == "distill" and args.action == "compare":
+        from . import distill
+
+        if not args.dbs:
+            print("usage: claudit distill compare DB [DB ...] --eval-dir DIR")
+            return 2
+        cmp = distill.compare([Path(d).expanduser() for d in args.dbs], Path(args.eval_dir).expanduser())
+        print(_table(distill.COMPARE_COLUMNS, distill.compare_rows(cmp)))
+        return 0
+
+    if args.cmd == "distill":
+        from . import distill
+
+        if args.action == "build":
+            try:
+                st = distill.build_dataset(con, Path(args.labels).expanduser(), Path(args.data).expanduser())
+            except distill.DistillError as e:
+                print(e)
+                return 1
+            print(f"train {st.train}  valid {st.valid}  (held-out benign excluded: {st.skipped_heldout})")
+            print(f"reasons from teacher {st.teacher_reasons}  templated {st.template_reasons}  by verdict {dict(st.by_verdict)}")
+            return 0
+        if args.action == "train":
+            argv = distill.train_argv(Path(args.data), Path(args.adapters), args.base_model, args.iters, args.num_layers)
+            print(" ".join(argv[2:]))
+            return distill.train(argv)
+        student = distill.Student(args.base_model, Path(args.adapters) if Path(args.adapters).exists() else None)
+        app = distill.create_student_app(student)
+        print(f"student at http://{args.host}:{args.port}  (base {args.base_model}, adapters {args.adapters})")
+        print(f"judge with: claudit judge --base-url http://{args.host}:{args.port} --model {distill.STUDENT_NAME}")
+        serve(app, args.host, args.port)
+        return 0
 
     if args.cmd == "memory":
         from . import memory

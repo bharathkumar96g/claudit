@@ -46,6 +46,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.16.7",
 ]
+train = [
+    "mlx-lm>=0.31.3",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

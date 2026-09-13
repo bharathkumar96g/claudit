@@ -3,7 +3,7 @@ import json
 from fastapi.testclient import TestClient
 
 from claudit.db import connect
-from claudit.ops import health, latency, recent_runs, record_run, timed_run
+from claudit.ops import health, latency, latency_by_model, recent_runs, record_run, timed_run
 from claudit.server import create_app
 from claudit.util import utc_now
 
@@ -57,3 +57,14 @@ def test_health_and_metrics_endpoints(tmp_path):
     m = client.get("/api/metrics").json()
     assert m["runs"][0]["kind"] == "scan" and m["runs"][0]["stats"]["events"] == 1
     assert m["latency"]["scans"]["n"] == 1
+
+
+def test_latency_by_model_splits_models_and_counts_unparseable(tmp_path):
+    con = connect(tmp_path / "t.duckdb")
+    con.execute("INSERT INTO judgments VALUES ('f1','confirmed',NULL,'r','qwen',7,10,5,800,now()),"
+                " ('f2','unsure',NULL,'model returned unparseable output','student',7,10,5,100,now()),"
+                " ('f3','benign',NULL,'r','student',7,10,5,300,now()), ('f4','confirmed',NULL,'r','rules',7,0,0,0,now())")
+    rows = latency_by_model(con)
+    assert [r["model"] for r in rows] == ["student", "qwen"]
+    assert rows[0]["n"] == 2 and rows[0]["unparseable"] == 1 and rows[0]["p50_ms"] == 200.0 and rows[0]["benign"] == 1
+    assert rows[1]["unparseable"] == 0
