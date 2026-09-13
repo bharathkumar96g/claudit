@@ -1,6 +1,6 @@
 # Design 03 — claudit guard: a local masking gateway
 
-Status: designed 2026-09-12, not implemented · Depends on: Designs 00–02, `docs/threat-model.md`
+Status: implemented 2026-09-13 (pseudonyms, rewriter, proxy, fail-safe, CLI, fake-upstream and property tests); live end-to-end test through a real Claude Code CLI session pending · Depends on: Designs 00–02, `docs/threat-model.md`
 
 ## Problem
 

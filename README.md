@@ -80,6 +80,24 @@ Regex can say "this has the shape of a secret." It can't say whether it's real. 
 
 Cheap deterministic filter first, model only where judgment is needed; structured JSON output enforced by schema; temperature 0. Any Ollama model works: `--model llama3.1:8b`.
 
+## Layer 4: the guard — prevention
+
+```bash
+uv run claudit guard                       # loopback proxy on :8787 -> api.anthropic.com
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787   # in the shell where you start Claude Code (CLI / VS Code)
+uv run claudit guard status                # counters: masked by class, restored, suspected misses, blocked writes
+```
+
+The audit layers report what already left. The guard keeps the high-precision classes from leaving: a local proxy replaces vendor-format keys, private-key bodies and connection-string passwords with **format-preserving pseudonyms** (same prefix, length and alphabet, so the same rule matches them and the model has no reason to alter them), deterministic within a session so prompt caching and multi-turn references keep working. The model reasons about the fake; the reply streams back through a rewriter that restores the real value — in prose, in thinking, and inside tool-call JSON — before Claude Code sees it, so a file Claude writes ends up with the real key.
+
+What it honours from the [gateway contract](https://code.claude.com/docs/en/llm-gateway-protocol): headers forwarded unchanged (your claude.ai login keeps working), the `system` array untouched, the stream never buffered, `ping` forwarded immediately. Only text inside `messages[*].content` is rewritten.
+
+**Fail-safe by design.** If the model alters a pseudonym so it can't be restored, you see the pseudonym — never a leak — and it's counted. If that happens inside a `Write`/`Edit` tool call, the guard emits an error event so the write is blocked rather than saving a placeholder into your `.env`. The mapping lives in memory only, is never logged or persisted, and is zeroed on exit. No request or response body is ever logged.
+
+**What it does not protect** is spelled out in [`docs/threat-model.md`](docs/threat-model.md): other clients, MCP servers, `curl` in Bash, WebFetch, subagents calling the API themselves, generic passwords and PII (audit-only classes), and the transcripts on disk, which Claude Code writes before the guard sees anything. The desktop app reads gateway routing from its own configuration, not from `ANTHROPIC_BASE_URL`.
+
+Tested with property-based tests over pseudonyms split at arbitrary frame and byte boundaries (text, thinking, and tool-call JSON) and against an in-process fake upstream that records exactly what it received.
+
 ## Layer 3: what to do about it
 
 Findings are grouped by fingerprint into **secrets** — one row per distinct value, with first and last seen, how many sessions and findings, which sources it entered through, and the judgment. That's the checklist:

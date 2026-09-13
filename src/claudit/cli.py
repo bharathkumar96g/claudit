@@ -217,7 +217,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.action == "status":
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{args.port}/guard/status", timeout=5) as r:  # nosec B310 - fixed loopback URL
+                # fixed loopback URL, so B310 (arbitrary scheme) does not apply
+                with urllib.request.urlopen(f"http://127.0.0.1:{args.port}/guard/status", timeout=5) as r:  # nosec B310
                     print(r.read().decode())
             except OSError as e:
                 print(f"guard not reachable on port {args.port}: {e}")
