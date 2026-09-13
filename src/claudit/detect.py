@@ -170,7 +170,8 @@ RULES: list[Rule] = [
         keywords=("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"),
     ),
     Rule("slack_token", "high", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), 90, keywords=("xox",)),
-    Rule("google_api_key", "high", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"), 90, keywords=("aiza",)),
+    # Trailing lookahead, not \b: a key may legitimately end in '-' or '_', which \b would not accept.
+    Rule("google_api_key", "high", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}(?![0-9A-Za-z_\-])"), 90, keywords=("aiza",)),
     Rule(
         "stripe_key", "high", re.compile(r"\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), 90,
         keywords=("_live_", "_test_"),
