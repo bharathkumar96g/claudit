@@ -323,3 +323,12 @@ tr.after td { color: var(--crit); }
 .details { margin-top: 14px; }
 .details summary { cursor: pointer; font: 600 10.5px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); padding: 8px 0; }
 .details[open] summary { margin-bottom: 12px; }
+
+/* first-time-user definitions */
+.info {
+  display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 6px;
+  border-radius: 50%; border: 1px solid var(--line-2); color: var(--muted); font: 600 9px/1 var(--mono);
+  cursor: help; vertical-align: 1px; text-transform: none; letter-spacing: 0;
+}
+.info:hover, .info:focus { color: var(--ink); border-color: var(--ink-2); outline: none; }
+.tooltip strong { text-transform: none; }

@@ -7,9 +7,40 @@ const SEV_VAR = { critical: "--crit", high: "--high", medium: "--med", low: "--l
 
 // Internal names never reach the screen. Verdicts come from a 7B model, so the words stay hedged.
 const SOURCE_LABEL = {
-  user_prompt: "you typed it", tool_result: "Claude read it", tool_input: "Claude wrote it",
-  assistant_text: "Claude said it", assistant_thinking: "Claude's thinking", attachment: "attached file",
+  user_prompt: "you typed it", tool_result: "the assistant read it", tool_input: "the assistant wrote it",
+  assistant_text: "the assistant said it", assistant_thinking: "the assistant's thinking", attachment: "attached file",
 };
+
+// Plain definitions for first-time users. Shown behind an (i) next to a label, or as a tooltip on a pill.
+const DEFINE = {
+  "likely real": "The local model found nothing saying this value is fake, an example or a placeholder. Treat it as live until you rotate it.",
+  "likely fake": "The text around it says it is a test, example or placeholder value. Prose can steer the model, so check when in doubt.",
+  "needs you": "The model saw signs pointing both ways. Open it and decide.",
+  "unreviewed": "The local model has not looked at this value yet.",
+  "model offline": "The model could not be reached when this value came up for review.",
+  "reappeared": "You marked this rotated, but the same value showed up in a later session. Either it is still in use somewhere, or the rotation missed a consumer.",
+  ledger: "One line per secret. Each dot is one appearance and its color says how the value entered the session. The green flag is the day you marked it rotated; a red ring is an appearance after that.",
+  origin: "How the value entered a session: you typed or pasted it, the assistant read it from a file or command output, or the assistant wrote it into a file or a command.",
+  type: "The pattern that matched — a private key, a cloud access key, a card number, and so on.",
+  severity: "How bad it is if the value is real. Critical: private keys and cloud credentials. High: API tokens and card numbers. Medium: generic secrets and personal data. Low: the rest.",
+  review: "The verdict of a model running on this machine, given a redacted window of context around the value. Vendor-format keys in production files are marked likely real by rule, without a model call.",
+  fingerprint: "A SHA-256 hash of the value. It lets the same secret be recognised across sessions and rescans without ever storing the value.",
+  coverage: "The guard replaces vendor-format credentials with pseudonyms before a request leaves this machine. Personal data and generic passwords have no reliable format, so they are audited but not masked.",
+  since: "Every value has a stable fingerprint, so two scans can be compared: values seen for the first time, and values seen again after you marked them rotated.",
+  "sessions · times": "How many distinct sessions the value appeared in, and how many times in total.",
+  guard: "A local proxy between your coding assistant and the model provider. It swaps secrets for format-preserving pseudonyms on the way out and restores them in the streamed reply.",
+  "local review": "Sends each ambiguous value, with a redacted window of context, to a model running on this machine. Nothing leaves the machine.",
+  contents: "Also ask the model to read prompts and file contents for sensitive information that has no pattern: customer data, internal names, financial figures. Slower.",
+  transcripts: "The session logs your coding assistant keeps on this machine. claudit reads them; it never writes to them.",
+};
+function info(key) {
+  const el = h("span", { class: "info", tabindex: 0, role: "img", "aria-label": DEFINE[key] || key }, "i");
+  el.addEventListener("pointermove", (e) => showTip(e, key, [DEFINE[key] || ""]));
+  el.addEventListener("pointerleave", hideTip);
+  el.addEventListener("blur", hideTip);
+  return el;
+}
+const pill = (cls, label) => h("span", { class: "pill " + cls, title: DEFINE[label] || "" }, label);
 const SOURCE_VAR = {
   user_prompt: "--accent", tool_result: "--series", tool_input: "--wrote", assistant_text: "--said",
   assistant_thinking: "--said", attachment: "--low",
@@ -281,7 +312,7 @@ function renderOverview() {
   const since = s.since;
   const el = $("since");
   if (since && since.previous_scan_at) {
-    el.replaceChildren(
+    el.replaceChildren(info("since"), " ",
       "since your previous scan ", h("b", {}, relTime(since.previous_scan_at)), "  ·  ",
       `${plural(since.sessions_touched, "session", "sessions")} read`, "  ·  ",
       h("span", { class: since.new_secrets ? "delta" : "" }, plural(since.new_secrets, "new secret", "new secrets")),
@@ -302,7 +333,7 @@ function renderOverview() {
     head = t.events ? `No pattern matched in ${fmtInt(t.events)} messages.` : "Nothing scanned yet.";
     sub = t.events
       ? `${plural(t.sessions, "session was", "sessions were")} checked against 235 secret and personal-data patterns. Patternless content (customer data, internal names) is only found when the review also reads contents.`
-      : "Scanning reads your Claude Code transcripts on this machine and keeps a fingerprint of each match, never the value.";
+      : "Scanning reads your coding assistant's transcripts on this machine and keeps a fingerprint of each match, never the value.";
     if (!t.events) action = go("scan transcripts", runScan);
   } else if (reappeared.length) {
     tone = "crit";
@@ -311,7 +342,7 @@ function renderOverview() {
     action = go("see it", () => showTab("secrets"));
   } else if (unreviewed.length) {
     tone = "warn";
-    head = `${plural(all.length, "secret or personal detail", "secrets and personal details")} appeared in ${sessions} of your ${plural(t.sessions, "Claude Code session", "Claude Code sessions")}.`;
+    head = `${plural(all.length, "secret or personal detail", "secrets and personal details")} appeared in ${sessions} of your ${plural(t.sessions, "coding session", "coding sessions")}.`;
     sub = `${unreviewed.length === open.length ? "None have" : `${fmtInt(unreviewed.length)} have not`} been reviewed. The local model sorts them into likely real, likely fake and needs-you — about ten seconds each, and nothing leaves this machine.`;
     action = go("run local review", runJudge);
   } else if (real.length || needsYou.length) {
@@ -345,6 +376,7 @@ function renderLedger() {
   const top = open.slice(0, 6);
   const box = $("ledger");
   $("ledger-sub").textContent = open.length > top.length ? `${top.length} of ${fmtInt(open.length)} open, worst first` : open.length ? `${open.length} open, worst first` : "";
+  $("ledger-info").replaceChildren(info("ledger"));
   $("ledger-legend").replaceChildren(
     ...Object.entries(SOURCE_LABEL).filter(([k]) => state.findings.some((f) => f.source === k)).map(([k, v]) =>
       h("span", {}, h("i", { style: `background:${cssVar(SOURCE_VAR[k])}` }), v)),
@@ -372,7 +404,7 @@ function renderLedger() {
         h("span", { class: "prev", title: x.preview }, x.preview)),
       strip,
       h("div", { class: "side" },
-        h("span", { class: "pill " + (x.reappeared ? "reappeared" : x.verdict === "unjudged" ? "unsure" : x.verdict) }, x.reappeared ? "reappeared" : reviewLabel(x.verdict)),
+        pill(x.reappeared ? "reappeared" : x.verdict === "unjudged" ? "unsure" : x.verdict, x.reappeared ? "reappeared" : reviewLabel(x.verdict)),
         acts),
     );
   });
@@ -434,7 +466,7 @@ function renderCoverage(open) {
       h("b", {}, fmtInt(not)), " are not (personal data and generic passwords stay audit-only)."),
     h("span", { class: "bar", title: `${maskable} maskable · ${not} not maskable` },
       h("i", { class: "m", style: `width:${(maskable / open.length) * 100}%` }), h("i", { class: "n", style: `width:${(not / open.length) * 100}%` })),
-    h("span", {}, up ? h("b", {}, "guard on") : ["guard ", h("b", {}, "off"), " — ", h("code", { class: "mono" }, "claudit guard")]),
+    h("span", {}, up ? h("b", {}, "guard on") : ["guard ", h("b", {}, "off"), " — ", h("code", { class: "mono" }, "claudit guard")], " ", info("coverage")),
   );
 }
 
@@ -604,7 +636,7 @@ function renderSecrets() {
       h("span", { class: "tag sev-" + s.severity }, sevShort(s.severity)),
       h("span", { class: "cat", title: s.category }, catLabel(s.category)),
       h("span", { class: "prev", title: s.preview }, s.preview),
-      h("span", {}, h("span", { class: "pill " + pillClass }, s.reappeared ? "reappeared" : reviewLabel(s.verdict))),
+      h("span", {}, pill(pillClass, s.reappeared ? "reappeared" : reviewLabel(s.verdict))),
       h("span", {}, `${s.sessions} · ${s.findings}×`),
       h("span", { class: "t" }, `${fmtDay(s.first_seen)} · ${fmtDay(s.last_seen)}`),
       h("span", { class: "src", title: (s.sources || []).map(srcLabel).join(", ") }, (s.sources || []).map(srcLabel).join(", ")),
@@ -633,7 +665,7 @@ function secretDetail(s) {
       h("td", { class: "mono" }, fmtWhen(a.ts)),
       h("td", {}, srcLabel(a.source)),
       h("td", { class: "mono", title: a.path || "" }, a.path || shortProject(a.project) || "—"),
-      h("td", {}, a.verdict ? [h("span", { class: "pill " + a.verdict }, reviewLabel(a.verdict)), a.reason ? h("div", { class: "muted" }, a.reason) : null] : h("span", { class: "muted" }, "unreviewed"))))));
+      h("td", {}, a.verdict ? [pill(a.verdict, reviewLabel(a.verdict)), a.reason ? h("div", { class: "muted" }, a.reason) : null] : h("span", { class: "muted" }, "unreviewed"))))));
   return [
     strip,
     h("div", { class: "apps" },
@@ -641,7 +673,7 @@ function secretDetail(s) {
       table,
       h("div", { class: "rotation", style: "padding-left:0" },
         h("div", {}, h("b", {}, "what to do: "), s.rotation),
-        h("div", { class: "muted" }, `fingerprint ${s.fingerprint.slice(0, 16)}…  ·  raw value, on this machine only: claudit reveal <id>`),
+        h("div", { class: "muted" }, "fingerprint ", info("fingerprint"), ` ${s.fingerprint.slice(0, 16)}…  ·  raw value, on this machine only: claudit reveal <id>`),
         s.note ? h("div", { class: "muted" }, `note: ${s.note}`) : null)),
   ];
 }
@@ -662,7 +694,7 @@ function renderFeed(rows) {
   const out = [];
   for (const r of rows.slice(0, LIMIT)) {
     const verdict = r.verdict
-      ? h("span", { class: "pill " + r.verdict + (state.fresh.has(r.id) ? " fresh" : "") }, reviewLabel(r.verdict))
+      ? pill(r.verdict + (state.fresh.has(r.id) ? " fresh" : ""), reviewLabel(r.verdict))
       : h("span", { class: "muted" }, "—");
     const row = h("div", { class: "row", role: "button", tabindex: 0,
       onclick: () => { state.expanded = state.expanded === r.id ? null : r.id; renderFeed(filteredFindings()); } },
@@ -750,7 +782,7 @@ function renderEval() {
 function renderSystem() {
   const s = state.summary, hz = state.health;
   const dot = (ok) => h("span", { class: "hdot " + (ok ? "ok" : "down") });
-  const row = (ok, k, ...txt) => h("div", { class: "sysrow" }, dot(ok), h("span", { class: "k" }, k), h("span", { class: "txt" }, ...txt));
+  const row = (ok, k, ...txt) => h("div", { class: "sysrow" }, dot(ok), h("span", { class: "k" }, k, DEFINE[k] ? info(k) : null), h("span", { class: "txt" }, ...txt));
   const g = hz && hz.guard, gs = g && g.status;
   $("sys-rows").replaceChildren(
     row(!!s.last_scan, "transcripts",
@@ -762,7 +794,7 @@ function renderSystem() {
     row(!!(g && g.ok), "guard",
       g && g.ok
         ? [h("b", {}, "on"), `. ${fmtInt(gs ? gs.values_masked : 0)} values replaced with pseudonyms before requests left this machine, ${fmtInt(gs ? gs.values_restored : 0)} restored in replies`, gs && gs.blocked_writes ? `, ${fmtInt(gs.blocked_writes)} file writes blocked` : "", "."]
-        : [h("b", {}, "off"), ". Requests from Claude Code go to the provider unmasked. Start it with ", h("code", {}, "claudit guard"), " and point the CLI at it."]),
+        : [h("b", {}, "off"), ". Requests from your coding assistant reach the provider unmasked. Start it with ", h("code", {}, "claudit guard"), " and point the assistant at it."]),
   );
   renderOps();
 }
@@ -908,5 +940,10 @@ $("btn-synth").addEventListener("click", runSynth);
 let resizeTimer = null;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { renderCharts(state.findings); if (state.summary) renderLedger(); }, 150); });
 
+for (const [id, keys] of [["secrets-head", ["severity", "type", null, "review", "sessions · times", null, "origin", null]], ["feed-head", [null, "severity", "type", null, "origin", null, "review"]]]) {
+  const cells = $(id).children;
+  keys.forEach((k, i) => { if (k && cells[i]) cells[i].append(info(k)); });
+}
+document.querySelector("label.toggle").append(info("contents"));
 showTab(location.hash.slice(1) || "overview");
 load().catch((err) => toast("failed to load: " + err.message, 8000));

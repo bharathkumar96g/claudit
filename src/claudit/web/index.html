@@ -16,7 +16,7 @@
   <div class="actions">
     <button id="btn-scan" class="btn accent">scan transcripts</button>
     <button id="btn-judge" class="btn">run local review</button>
-    <label class="toggle" title="Also ask the model to read prompts and file contents for sensitive information that has no pattern. Slower."><input type="checkbox" id="opt-semantic"> also read contents</label>
+    <label class="toggle"><input type="checkbox" id="opt-semantic"> also read contents</label>
     <button id="btn-synth" class="btn ghost" hidden>reset demo data</button>
   </div>
 </header>
@@ -36,7 +36,7 @@
 <main class="layout">
   <section class="panel" data-tab="overview" id="ledger-panel">
     <div class="panel-head">
-      <span class="eyebrow">the life of each secret</span>
+      <span class="eyebrow">the life of each secret <span id="ledger-info"></span></span>
       <span class="muted" id="ledger-sub"></span>
     </div>
     <div class="legend" id="ledger-legend"></div>
@@ -120,7 +120,7 @@
 
   <footer class="privacy">
     <span class="eyebrow">privacy</span>
-    every value on this screen is masked · detection runs before anything is stored · only a fingerprint and a masked preview are kept · the model runs on this machine · the server binds to localhost and has no endpoint for raw values
+    every value on this screen is masked · detection runs before anything is stored · only a fingerprint and a masked preview are kept · the model runs on this machine · the server binds to localhost and has no endpoint for raw values · reads Claude Code transcripts today; other assistants' logs are importers away
   </footer>
 </main>
 
