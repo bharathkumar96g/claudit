@@ -18,12 +18,14 @@ excluded from training so they stay held out for the comparison.
 from __future__ import annotations
 
 import json
+import queue
 import subprocess  # nosec B404  fixed argv, no shell
 import sys
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -206,29 +208,45 @@ def rss_mb() -> int | None:
 
 
 class Student:
-    """Loads base + adapter once; generation is serialised because MLX is not thread-safe."""
+    """Base + adapter loaded once, on a dedicated thread that also runs every generation: MLX streams are
+    bound to the thread that created them, and FastAPI serves sync endpoints from a worker pool."""
 
     def __init__(self, base_model: str, adapter_dir: Path | None, max_tokens: int = 200) -> None:
-        from mlx_lm import generate, load  # the `train` dependency group
-        from mlx_lm.sample_utils import make_sampler
-
-        loaded = load(base_model, adapter_path=str(adapter_dir) if adapter_dir else None)
-        self.model, self.tokenizer = loaded[0], loaded[1]
-        self._generate = generate
-        self._sampler = make_sampler(temp=0.0)
         self.max_tokens = max_tokens
-        self._lock = threading.Lock()
+        self._queue: queue.Queue[tuple[list[dict], Future]] = queue.Queue()
+        self._ready = threading.Event()
+        self._error: BaseException | None = None
+        threading.Thread(target=self._run, args=(base_model, adapter_dir), daemon=True, name="student").start()
+        self._ready.wait()
+        if self._error is not None:
+            raise self._error
+
+    def _run(self, base_model: str, adapter_dir: Path | None) -> None:
+        try:
+            from mlx_lm import generate, load  # the `train` dependency group
+            from mlx_lm.sample_utils import make_sampler
+
+            loaded = load(base_model, adapter_path=str(adapter_dir) if adapter_dir else None)
+            model, tokenizer = loaded[0], loaded[1]
+            sampler = make_sampler(temp=0.0)
+        except BaseException as e:  # surfaced to the constructor
+            self._error = e
+            self._ready.set()
+            return
+        self._ready.set()
+        while True:
+            messages, fut = self._queue.get()
+            try:
+                prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                text = generate(model, tokenizer, prompt=prompt, max_tokens=self.max_tokens, sampler=sampler, verbose=False)
+                fut.set_result((text.strip(), len(tokenizer.encode(prompt)), len(tokenizer.encode(text))))
+            except BaseException as e:  # handed to the caller, worker stays alive
+                fut.set_exception(e)
 
     def __call__(self, messages: list[dict]) -> tuple[str, int, int]:
-        prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-        with self._lock:
-            text = self._generate(
-                self.model, self.tokenizer, prompt=prompt, max_tokens=self.max_tokens, sampler=self._sampler,
-                verbose=False,
-            )
-        n_in = len(self.tokenizer.encode(prompt))
-        n_out = len(self.tokenizer.encode(text))
-        return text.strip(), n_in, n_out
+        fut: Future = Future()
+        self._queue.put((messages, fut))
+        return fut.result()
 
 
 def create_student_app(

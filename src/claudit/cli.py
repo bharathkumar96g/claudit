@@ -277,8 +277,6 @@ def main(argv: list[str] | None = None) -> int:
         serve(app, args.host, args.port)
         return 0
 
-    con = connect(db_path)
-
     if args.cmd == "distill" and args.action == "compare":
         from . import distill
 
@@ -293,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import distill
 
         if args.action == "build":
+            con = connect(db_path)
             try:
                 st = distill.build_dataset(con, Path(args.labels).expanduser(), Path(args.data).expanduser())
             except distill.DistillError as e:
@@ -305,12 +304,16 @@ def main(argv: list[str] | None = None) -> int:
             argv = distill.train_argv(Path(args.data), Path(args.adapters), args.base_model, args.iters, args.num_layers)
             print(" ".join(argv[2:]))
             return distill.train(argv)
+        from .server import serve
+
         student = distill.Student(args.base_model, Path(args.adapters) if Path(args.adapters).exists() else None)
         app = distill.create_student_app(student)
         print(f"student at http://{args.host}:{args.port}  (base {args.base_model}, adapters {args.adapters})")
         print(f"judge with: claudit judge --base-url http://{args.host}:{args.port} --model {distill.STUDENT_NAME}")
         serve(app, args.host, args.port)
         return 0
+
+    con = connect(db_path)
 
     if args.cmd == "memory":
         from . import memory
