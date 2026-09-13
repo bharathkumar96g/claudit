@@ -7,8 +7,9 @@ const SEV_VAR = { critical: "--crit", high: "--high", medium: "--med", low: "--l
 const state = {
   summary: null,
   findings: [],
-  secrets: [],
+  secrets: [],        // every distinct secret, all states; the checklist filters by state client-side
   secretsState: "open",
+  tab: "overview",
   secretOpen: null,
   health: null,
   metrics: null,
@@ -113,7 +114,7 @@ async function api(path, opts = {}) {
 async function load() {
   try {
     const [summary, findings, secrets, health, metrics] = await Promise.all([
-      api("/api/summary"), api("/api/findings"), api(`/api/secrets?state=${state.secretsState}`),
+      api("/api/summary"), api("/api/findings"), api("/api/secrets?state=all"),
       api("/api/health").catch(() => null), api("/api/metrics").catch(() => null)]);
     state.secrets = secrets;
     state.health = health;
@@ -155,13 +156,57 @@ function render() {
   renderHeader();
   renderFilterOptions();
   const rows = filtered();
-  renderHero(rows);
+  renderHero();
   renderSecrets();
-  renderCharts(rows);
+  renderCharts(state.findings);
   renderFeed(rows);
+  renderModel();
   renderSemantic();
   renderEval();
   renderOps();
+  renderTabs();
+}
+
+// ---------- tabs ----------
+const TABS = ["overview", "secrets", "findings", "model", "operations"];
+function showTab(name) {
+  if (!TABS.includes(name)) name = "overview";
+  state.tab = name;
+  for (const el of document.querySelectorAll("[data-tab]:not(.tab)")) el.classList.toggle("tab-off", el.dataset.tab !== name);
+  for (const b of document.querySelectorAll(".tab")) b.classList.toggle("active", b.dataset.tab === name);
+  if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+  if (name === "overview" || name === "findings") renderCharts(state.findings);
+}
+function renderTabs() {
+  const open = state.secrets.filter((x) => x.state === "open").length;
+  const judged = (state.summary.totals || {}).judged || 0;
+  $("tab-n-secrets").textContent = open ? fmtInt(open) : "";
+  $("tab-n-findings").textContent = state.findings.length ? fmtInt(state.findings.length) : "";
+  $("tab-n-model").textContent = state.job ? "running" : judged ? fmtInt(judged) : "";
+}
+
+// The Model tab is either a live/last job log, or a plain statement of what judging would do.
+function renderModel() {
+  const judged = (state.summary.totals || {}).judged || 0;
+  const empty = !state.job && !judged;
+  $("model-empty").hidden = !empty;
+  if (empty) {
+    const n = state.findings.length;
+    $("model-empty-body").replaceChildren(
+      h("div", {}, n
+        ? `${fmtInt(n)} findings, none reviewed yet. Judge sends the ambiguous ones to ${state.summary.model} on this machine and sorts them into confirmed, benign and unsure — about 10 s per model call, vendor-format keys in production paths are confirmed by rule without a call.`
+        : "Nothing to review yet. Scan first."),
+      n ? h("button", { class: "btn accent small", onclick: runJudge }, "judge now") : null,
+    );
+  }
+  const models = (state.metrics && state.metrics.by_model) || [];
+  $("models-card").hidden = !models.length;
+  $("models").querySelector("tbody").replaceChildren(
+    ...models.map((m) => h("tr", {}, h("td", {}, m.model), h("td", { class: "num" }, fmtInt(m.n)),
+      h("td", { class: "num" }, m.p50_ms ?? "—"), h("td", { class: "num" }, m.p95_ms ?? "—"),
+      h("td", { class: "num" }, m.confirmed), h("td", { class: "num" }, m.benign), h("td", { class: "num" }, m.unsure),
+      h("td", { class: "num" }, m.unparseable)))
+  );
 }
 
 function renderOps() {
@@ -219,6 +264,15 @@ function renderHeader() {
     h("span", {}, "scan ", relTime(s.last_scan)),
   );
   $("btn-synth").hidden = !s.demo;
+  const g = state.health && state.health.guard;
+  const gb = $("guard-badge");
+  gb.hidden = !state.health;
+  if (state.health) {
+    const up = !!(g && g.ok);
+    gb.className = "chip " + (up ? "guard" : "unguarded");
+    gb.textContent = up ? `guarded · ${fmtInt((g.status && g.status.values_masked) || 0)} masked` : "no guard";
+    gb.title = up ? "claudit guard is masking secrets before requests leave this machine" : "start with: claudit guard";
+  }
 }
 
 function fillSelect(id, values, current) {
@@ -238,48 +292,63 @@ function renderFilterOptions() {
   fillSelect("f-verdict", VERDICTS.filter((v) => all.some((x) => (x.verdict || "not judged") === v)), state.filters.verdict);
 }
 
-function renderHero(rows) {
+function renderHero() {
   const t = state.summary.totals;
-  const filtering = rows.length !== state.findings.length;
-  const sessions = new Set(rows.map((r) => r.session)).size;
-  const critHigh = rows.filter((r) => r.severity === "critical" || r.severity === "high").length;
-  const judged = rows.filter((r) => r.verdict).length;
-  const confirmed = rows.filter((r) => r.verdict === "confirmed").length;
-  const benign = rows.filter((r) => r.verdict === "benign").length;
+  const all = state.secrets;
+  const open = all.filter((x) => x.state === "open");
+  const toRotate = open.filter((x) => x.verdict === "confirmed");
+  const unreviewed = open.filter((x) => x.verdict === "unjudged");
+  const rotated = all.filter((x) => x.state === "rotated").length;
+  const dismissed = all.filter((x) => x.state === "dismissed").length;
+  const critHigh = open.filter((x) => x.severity === "critical" || x.severity === "high").length;
+  const sessions = new Set(state.findings.map((r) => r.session)).size;
 
-  $("hero-num").textContent = fmtInt(rows.length);
-  $("hero-sub").textContent = filtering
-    ? `findings matching filters · ${fmtInt(state.findings.length)} total`
-    : `findings across ${fmtInt(t.sessions)} sessions · ${fmtInt(t.events)} events scanned`;
+  $("hero-num").textContent = fmtInt(open.length);
+  $("hero-sub").textContent = all.length
+    ? `distinct values still open, of ${fmtInt(all.length)} detected · ${fmtInt(t.findings)} findings across ${fmtInt(t.sessions)} sessions · ${fmtInt(t.events)} events scanned`
+    : `${fmtInt(t.events)} events scanned across ${fmtInt(t.sessions)} sessions`;
 
-  const bySev = countBy(rows, "severity");
+  const bySev = countBy(open, "severity");
   const bar = $("sevbar");
   bar.replaceChildren();
-  const total = rows.length || 1;
-  for (const s of SEVERITIES) {
-    const n = bySev.get(s) || 0;
+  const total = open.length || 1;
+  for (const sev of SEVERITIES) {
+    const n = bySev.get(sev) || 0;
     if (!n) continue;
-    const seg = h("div", { class: "seg", style: `width:${Math.max(1.5, (n / total) * 100)}%; background:${cssVar(SEV_VAR[s])}` });
-    seg.addEventListener("pointermove", (e) => showTip(e, `${n} ${s}`, [`${Math.round((n / total) * 100)}% of ${rows.length}`]));
+    const seg = h("div", { class: "seg", style: `width:${Math.max(1.5, (n / total) * 100)}%; background:${cssVar(SEV_VAR[sev])}` });
+    seg.addEventListener("pointermove", (e) => showTip(e, `${n} ${sev}`, [`${Math.round((n / total) * 100)}% of ${open.length} open secrets`]));
     seg.addEventListener("pointerleave", hideTip);
     bar.append(seg);
   }
-  if (!rows.length) bar.append(h("div", { class: "empty" }, "no findings in this view"));
+  if (!open.length) bar.append(h("div", { class: "empty" }, all.length ? "nothing open" : "nothing detected"));
   $("sevlegend").replaceChildren(
-    ...SEVERITIES.map((s) => h("span", { class: "sev-" + s }, h("span", { class: "tag" }, s), h("b", {}, fmtInt(bySev.get(s) || 0))))
+    ...SEVERITIES.map((sev) => h("span", { class: "sev-" + sev }, h("span", { class: "tag" }, sev), h("b", {}, fmtInt(bySev.get(sev) || 0))))
   );
 
-  const openConfirmed = state.secrets.filter((s) => s.state === "open" && s.verdict === "confirmed").length;
   const stats = [
-    ["to rotate", state.secretsState === "open" ? fmtInt(openConfirmed) : "—", "open, confirmed secrets"],
-    ["critical + high", fmtInt(critHigh), rows.length ? `${Math.round((critHigh / rows.length) * 100)}% of view` : "—"],
-    ["sessions affected", `${fmtInt(sessions)}`, `of ${fmtInt(t.sessions)} scanned`],
-    ["model reviewed", judged ? fmtInt(judged) : "—", judged ? `${confirmed} confirmed · ${benign} benign` : "run judge"],
+    ["to rotate", fmtInt(toRotate.length), "open and confirmed by the model"],
+    ["unreviewed", fmtInt(unreviewed.length), unreviewed.length ? "open, no verdict yet" : "every open secret has a verdict"],
+    ["critical + high", fmtInt(critHigh), open.length ? `${Math.round((critHigh / open.length) * 100)}% of open` : "—"],
+    ["sessions affected", fmtInt(sessions), `of ${fmtInt(t.sessions)} scanned`],
+    ["rotated · dismissed", `${fmtInt(rotated)} · ${fmtInt(dismissed)}`, "your decisions, kept across rescans"],
     ["last scan", relTime(state.summary.last_scan), state.summary.last_scan ? asDate(state.summary.last_scan).toLocaleString() : "—"],
   ];
   $("hero-stats").replaceChildren(
-    ...stats.map(([k, v, s]) => h("div", { class: "stat" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v), h("div", { class: "s" }, s)))
+    ...stats.map(([k, v, sub]) => h("div", { class: "stat" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v), h("div", { class: "s" }, sub)))
   );
+
+  // One sentence on what to do next, in priority order: scan, judge, rotate, done.
+  const step = $("next-step");
+  const go = (label, fn, accent) => h("button", { class: "btn small" + (accent ? " accent" : ""), onclick: fn }, label);
+  if (!state.findings.length) {
+    step.replaceChildren(`No findings yet. Scan reads the transcripts under ${state.summary.transcripts_dir} and stores fingerprints, never values.`, go("scan", runScan, true));
+  } else if (unreviewed.length) {
+    step.replaceChildren(`${fmtInt(unreviewed.length)} open secret${unreviewed.length === 1 ? " has" : "s have"} no verdict yet. Judge sorts them into confirmed, benign and unsure with the local model.`, go("judge", runJudge, true));
+  } else if (toRotate.length) {
+    step.replaceChildren(`${fmtInt(toRotate.length)} confirmed secret${toRotate.length === 1 ? " is" : "s are"} still open. Rotate them at the provider, then mark them here.`, go("open secrets", () => showTab("secrets")));
+  } else {
+    step.replaceChildren("All clear: every detected value is rotated, dismissed or benign.");
+  }
 }
 
 // Horizontal bars: one series, value at the tip, hover tooltip on a hit area larger than the mark.
@@ -406,10 +475,22 @@ async function setSecretState(fp, newState) {
 }
 
 function renderSecrets() {
-  const rows = state.secrets;
+  const rows = state.secretsState === "all" ? state.secrets : state.secrets.filter((x) => x.state === state.secretsState);
   const el = $("secrets");
   $("secrets-count").textContent = `${rows.length} ${state.secretsState === "all" ? "" : state.secretsState} secret${rows.length === 1 ? "" : "s"}`;
-  if (!rows.length) { el.replaceChildren(h("div", { class: "empty" }, `no ${state.secretsState} secrets`)); return; }
+  const unjudged = rows.filter((x) => x.verdict === "unjudged").length;
+  const note = $("secrets-note");
+  note.hidden = !unjudged;
+  if (unjudged) {
+    note.replaceChildren(`${fmtInt(unjudged)} of these have no verdict yet — the model has not looked at them. `,
+      h("a", { href: "#model", onclick: (e) => { e.preventDefault(); runJudge(); } }, "judge now"));
+  }
+  if (!rows.length) {
+    el.replaceChildren(h("div", { class: "empty-state" }, state.secrets.length
+      ? `no ${state.secretsState} secrets`
+      : state.findings.length ? "no secrets" : "nothing detected yet — run a scan"));
+    return;
+  }
   const out = [];
   for (const s of rows) {
     const acts = h("span", { class: "acts" });
@@ -450,7 +531,14 @@ function renderFeed(rows) {
   const LIMIT = 400;
   const feed = $("feed");
   $("table-count").textContent = rows.length > LIMIT ? `${LIMIT} of ${fmtInt(rows.length)}` : `${fmtInt(rows.length)} rows`;
-  if (!rows.length) { feed.replaceChildren(h("div", { class: "empty" }, "no findings in this view")); return; }
+  if (!rows.length) {
+    const filtering = rows.length !== state.findings.length;
+    feed.replaceChildren(h("div", { class: "empty-state" },
+      filtering ? "no findings match these filters" : `no findings yet — scan reads ${state.summary.transcripts_dir}`,
+      filtering ? h("button", { class: "btn small", onclick: () => $("f-clear").click() }, "clear filters")
+                : h("button", { class: "btn accent small", onclick: runScan }, "scan")));
+    return;
+  }
   const out = [];
   for (const r of rows.slice(0, LIMIT)) {
     const verdict = r.verdict
@@ -538,6 +626,8 @@ async function runJudge() {
     const { job } = await api(`/api/judge?semantic=${semantic}`, { method: "POST" });
     state.job = job;
     setLive("busy", "judging");
+    showTab("model");
+    $("model-empty").hidden = true;
     $("job").hidden = false;
     $("job-status").textContent = "starting";
     $("job-log").textContent = "";
@@ -602,11 +692,14 @@ $("f-clear").addEventListener("click", () => {
   $("f-q").value = "";
   render();
 });
-$("secrets-state").addEventListener("change", (e) => { state.secretsState = e.target.value; load(); });
+$("secrets-state").addEventListener("change", (e) => { state.secretsState = e.target.value; renderSecrets(); });
+for (const b of document.querySelectorAll(".tab")) b.addEventListener("click", () => showTab(b.dataset.tab));
+window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+showTab(location.hash.slice(1) || "overview");
 $("btn-scan").addEventListener("click", runScan);
 $("btn-judge").addEventListener("click", runJudge);
 $("btn-synth").addEventListener("click", runSynth);
 let resizeTimer = null;
-window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => renderCharts(filtered()), 150); });
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => renderCharts(state.findings), 150); });
 
 load().catch((err) => toast("failed to load: " + err.message, 8000));

@@ -11,6 +11,7 @@
   <div class="wordmark">claudit<span class="cursor">_</span></div>
   <span id="mode-badge" class="chip"></span>
   <span class="live"><span id="live-dot" class="live-dot"></span><span id="live-text">live</span></span>
+  <span id="guard-badge" class="chip" hidden></span>
   <div class="meta" id="meta"></div>
   <div class="actions">
     <button id="btn-scan" class="btn accent">scan</button>
@@ -20,21 +21,30 @@
   </div>
 </header>
 
-<section class="hero">
+<nav class="tabs" id="tabs" aria-label="sections">
+  <button class="tab" data-tab="overview">overview</button>
+  <button class="tab" data-tab="secrets">secrets<span class="tab-n" id="tab-n-secrets"></span></button>
+  <button class="tab" data-tab="findings">findings<span class="tab-n" id="tab-n-findings"></span></button>
+  <button class="tab" data-tab="model">model<span class="tab-n" id="tab-n-model"></span></button>
+  <button class="tab" data-tab="operations">operations</button>
+</nav>
+
+<section class="hero" data-tab="overview">
   <div class="hero-main">
-    <div class="eyebrow">exposure</div>
+    <div class="eyebrow">secrets open</div>
     <div class="hero-num" id="hero-num">0</div>
     <div class="hero-sub" id="hero-sub"></div>
+    <div class="next" id="next-step"></div>
   </div>
   <div class="hero-sev">
-    <div class="eyebrow">by severity</div>
+    <div class="eyebrow">open secrets by severity</div>
     <div class="sevbar" id="sevbar" role="img"></div>
     <div class="sevlegend" id="sevlegend"></div>
   </div>
   <div class="hero-stats" id="hero-stats"></div>
 </section>
 
-<section class="filters" id="filters">
+<section class="filters" data-tab="findings" id="filters">
   <span class="eyebrow">filter</span>
   <select id="f-severity"><option value="">severity: all</option></select>
   <select id="f-category"><option value="">category: all</option></select>
@@ -46,39 +56,50 @@
 </section>
 
 <main class="layout">
-  <section class="panel wide" id="secrets-panel">
+  <section class="charts-row" data-tab="overview">
+    <section class="panel"><div class="panel-head"><span class="eyebrow">findings by category</span></div><div class="chart" id="c-category"></div></section>
+    <section class="panel"><div class="panel-head"><span class="eyebrow">by source</span><span class="muted">who put it in front of the model</span></div><div class="chart" id="c-source"></div></section>
+    <section class="panel"><div class="panel-head"><span class="eyebrow">per day</span></div><div class="chart" id="c-timeline"></div></section>
+  </section>
+
+  <section class="panel" id="secrets-panel" data-tab="secrets">
     <div class="panel-head">
       <span class="eyebrow">secrets to act on</span>
       <span class="muted mono" id="secrets-count"></span>
       <select id="secrets-state" class="mini"><option value="open">open</option><option value="rotated">rotated</option><option value="dismissed">dismissed</option><option value="all">all</option></select>
     </div>
+    <div class="note" id="secrets-note" hidden></div>
     <div class="feed-head mono secrets-grid"><span>sev</span><span>category</span><span>preview</span><span>verdict</span><span>sessions</span><span>first · last seen</span><span>via</span><span>action</span></div>
     <div id="secrets" class="feed-body"></div>
   </section>
 
-  <section class="panel feed">
-    <div class="panel-head"><span class="eyebrow">live feed</span><span class="muted mono" id="table-count"></span></div>
+  <section class="panel feed" data-tab="findings">
+    <div class="panel-head"><span class="eyebrow">every finding</span><span class="muted mono" id="table-count"></span></div>
     <div class="feed-head mono"><span>time</span><span>sev</span><span>category</span><span>preview</span><span>source</span><span>project</span><span>verdict</span></div>
     <div id="feed" class="feed-body"></div>
   </section>
 
-  <aside class="side">
-    <section class="panel"><div class="panel-head"><span class="eyebrow">by category</span></div><div class="chart" id="c-category"></div></section>
-    <section class="panel"><div class="panel-head"><span class="eyebrow">by source</span><span class="muted">who put it in front of the model</span></div><div class="chart" id="c-source"></div></section>
-    <section class="panel"><div class="panel-head"><span class="eyebrow">per day</span></div><div class="chart" id="c-timeline"></div></section>
-  </aside>
+  <section class="panel" id="model-empty" data-tab="model" hidden>
+    <div class="panel-head"><span class="eyebrow">model judge</span></div>
+    <div class="empty-state" id="model-empty-body"></div>
+  </section>
 
-  <section class="panel wide" id="job" hidden>
+  <section class="panel" id="job" data-tab="model" hidden>
     <div class="panel-head"><span class="eyebrow">model judge</span><span id="job-status" class="muted mono"></span></div>
     <pre id="job-log" class="term"></pre>
   </section>
 
-  <section class="panel wide" id="semantic-card" hidden>
+  <section class="panel" id="models-card" data-tab="model" hidden>
+    <div class="panel-head"><span class="eyebrow">models that have reviewed this database</span><span class="muted">latency per call, from stored verdicts</span></div>
+    <div class="table-wrap"><table id="models"><thead><tr><th>model</th><th class="num">calls</th><th class="num">p50 ms</th><th class="num">p95 ms</th><th class="num">confirmed</th><th class="num">benign</th><th class="num">unsure</th><th class="num">unparseable</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="panel" id="semantic-card" data-tab="model" hidden>
     <div class="panel-head"><span class="eyebrow">sensitive content without a pattern</span><span class="muted">model-found</span></div>
     <div class="table-wrap"><table id="semantic"><thead><tr><th>when</th><th>kind</th><th>sev</th><th>summary</th><th>project</th></tr></thead><tbody></tbody></table></div>
   </section>
 
-  <section class="panel wide" id="eval-card" hidden>
+  <section class="panel" id="eval-card" data-tab="model" hidden>
     <div class="panel-head"><span class="eyebrow">evaluation against planted secrets</span><span class="muted" id="eval-sub"></span></div>
     <div class="eval-grid">
       <div><div class="subhead">detection</div><div class="table-wrap"><table id="eval-detect"><thead><tr><th>category</th><th class="num">tp</th><th class="num">fp</th><th class="num">fn</th><th class="num">precision</th><th class="num">recall</th><th class="num">f1</th></tr></thead><tbody></tbody></table></div></div>
@@ -86,7 +107,7 @@
     </div>
   </section>
 
-  <section class="panel wide" id="ops-panel">
+  <section class="panel" id="ops-panel" data-tab="operations">
     <div class="panel-head"><span class="eyebrow">operations</span><span class="muted mono" id="ops-sub"></span></div>
     <div class="ops-grid">
       <div id="ops-health"></div>
@@ -96,7 +117,7 @@
     </div>
   </section>
 
-  <footer class="privacy wide">
+  <footer class="privacy">
     <span class="eyebrow">privacy</span>
     nothing on this screen is a secret · detection runs before storage · findings hold a sha-256 fingerprint and a masked preview · model layer is local ollama · server binds to localhost and has no endpoint for raw values
   </footer>

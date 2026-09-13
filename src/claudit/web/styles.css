@@ -109,10 +109,30 @@ body {
 .filters select:focus, .filters input:focus { outline: 1px solid var(--accent); outline-offset: 0; }
 
 /* layout */
-.layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); gap: 16px; padding: 16px 24px 32px; max-width: 1500px; margin: 0 auto; }
-.side { display: grid; gap: 16px; align-content: start; }
-.wide { grid-column: 1 / -1; }
-@media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .hero { grid-template-columns: 1fr; } }
+.layout { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 16px 24px 32px; max-width: 1500px; margin: 0 auto; }
+.charts-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 980px) { .charts-row { grid-template-columns: 1fr; } .hero { grid-template-columns: 1fr; } }
+
+/* tabs: one screen answers one question */
+.tabs { display: flex; gap: 2px; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 60%, transparent); }
+.tab {
+  font: 600 11px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+  background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 13px 14px 11px; cursor: pointer;
+}
+.tab:hover { color: var(--ink-2); }
+.tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+.tab-n { margin-left: 7px; color: var(--accent); font-weight: 700; }
+.tab.active .tab-n { color: var(--accent); }
+.tab-off { display: none !important; }
+
+.chip.guard { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); }
+.chip.unguarded { color: var(--muted); }
+.next { margin-top: 16px; color: var(--ink-2); font: 12.5px/1.5 var(--sans); max-width: 40ch; }
+.next .btn { margin-left: 10px; vertical-align: middle; }
+.note { font: 12px var(--mono); color: var(--accent); padding: 4px 8px 10px; }
+.note a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+.empty-state { padding: 34px 16px; text-align: center; color: var(--ink-2); font: 13px/1.6 var(--sans); }
+.empty-state .btn { display: inline-block; margin-top: 12px; }
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; min-width: 0; }
 .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
