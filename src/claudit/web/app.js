@@ -3,6 +3,17 @@
 const SEVERITIES = ["critical", "high", "medium", "low"];
 const VERDICTS = ["confirmed", "benign", "unsure", "unavailable", "not judged"];
 const SEV_VAR = { critical: "--crit", high: "--high", medium: "--med", low: "--low" };
+// Internal names never reach the screen.
+const SOURCE_LABEL = {
+  tool_result: "files & output Claude read", tool_input: "text Claude wrote or ran", user_prompt: "you typed or pasted",
+  assistant_text: "Claude's replies", assistant_thinking: "Claude's thinking", attachment: "attached files",
+};
+const REVIEW_LABEL = { confirmed: "real", benign: "not real", unsure: "unsure", unavailable: "unavailable", unjudged: "not reviewed", "not judged": "not reviewed" };
+const srcLabel = (v) => SOURCE_LABEL[v] || v;
+const reviewLabel = (v) => REVIEW_LABEL[v] || v;
+const catLabel = (v) => (v || "").replace(/[_-]+/g, " ");
+const sevShort = (v) => (v === "critical" ? "crit" : v === "medium" ? "med" : v);
+const sevRank = (v) => SEVERITIES.indexOf(v);
 
 const state = {
   summary: null,
@@ -156,7 +167,7 @@ function render() {
   renderHeader();
   renderFilterOptions();
   const rows = filtered();
-  renderHero();
+  renderOverview();
   renderSecrets();
   renderCharts(state.findings);
   renderFeed(rows);
@@ -194,9 +205,9 @@ function renderModel() {
     const n = state.findings.length;
     $("model-empty-body").replaceChildren(
       h("div", {}, n
-        ? `${fmtInt(n)} findings, none reviewed yet. Judge sends the ambiguous ones to ${state.summary.model} on this machine and sorts them into confirmed, benign and unsure — about 10 s per model call, vendor-format keys in production paths are confirmed by rule without a call.`
+        ? `Nothing reviewed yet. Review sends each ambiguous value to ${state.summary.model} on this machine and sorts it into real, not real or unsure — about ten seconds per call. Vendor-format keys sitting in production files are marked real by rule without a call.`
         : "Nothing to review yet. Scan first."),
-      n ? h("button", { class: "btn accent small", onclick: runJudge }, "judge now") : null,
+      n ? h("button", { class: "btn accent small", onclick: runJudge }, "review now") : null,
     );
   }
   const models = (state.metrics && state.metrics.by_model) || [];
@@ -217,6 +228,14 @@ function renderOps() {
   const row = (k, v) => h("div", { class: "ops-row" }, h("span", {}, k), h("span", { class: "v" }, v));
   const fill = (id, ...kids) => $(id).replaceChildren(...kids.flat().filter((c) => c !== null && c !== undefined));
 
+  const s = state.summary;
+  fill("ops-config",
+    h("div", { class: "k" }, "configuration"),
+    row("database", h("span", { class: "v mono", title: s.db }, s.db)),
+    row("transcripts", h("span", { class: "v mono", title: s.transcripts_dir }, s.transcripts_dir)),
+    row("model", s.model),
+    row("last scan", relTime(s.last_scan)),
+  );
   fill("ops-health",
     h("div", { class: "k" }, "health"),
     row(h("span", {}, dot(hz.db.ok), "database"), hz.db.ok ? "ok" : "down"),
@@ -257,12 +276,6 @@ function renderHeader() {
   const badge = $("mode-badge");
   badge.textContent = s.demo ? "demo · synthetic" : "local · your transcripts";
   badge.classList.toggle("demo", s.demo);
-  $("meta").replaceChildren(
-    h("span", {}, "db ", s.db),
-    h("span", {}, "src ", s.transcripts_dir),
-    h("span", {}, "model ", s.model),
-    h("span", {}, "scan ", relTime(s.last_scan)),
-  );
   $("btn-synth").hidden = !s.demo;
   const g = state.health && state.health.guard;
   const gb = $("guard-badge");
@@ -275,10 +288,10 @@ function renderHeader() {
   }
 }
 
-function fillSelect(id, values, current) {
+function fillSelect(id, values, current, label = (v) => v) {
   const sel = $(id);
   const first = sel.options[0];
-  sel.replaceChildren(first, ...values.map((v) => h("option", { value: v }, v)));
+  sel.replaceChildren(first, ...values.map((v) => h("option", { value: v }, label(v))));
   sel.value = values.includes(current) ? current : "";
 }
 
@@ -286,68 +299,85 @@ function renderFilterOptions() {
   const all = state.findings;
   const uniq = (key) => [...new Set(all.map((x) => x[key]).filter(Boolean))].sort();
   fillSelect("f-severity", SEVERITIES.filter((s) => all.some((x) => x.severity === s)), state.filters.severity);
-  fillSelect("f-category", uniq("category"), state.filters.category);
-  fillSelect("f-source", uniq("source"), state.filters.source);
-  fillSelect("f-project", uniq("project"), state.filters.project);
-  fillSelect("f-verdict", VERDICTS.filter((v) => all.some((x) => (x.verdict || "not judged") === v)), state.filters.verdict);
+  fillSelect("f-category", uniq("category"), state.filters.category, catLabel);
+  fillSelect("f-source", uniq("source"), state.filters.source, srcLabel);
+  fillSelect("f-project", uniq("project"), state.filters.project, shortProject);
+  fillSelect("f-verdict", VERDICTS.filter((v) => all.some((x) => (x.verdict || "not judged") === v)), state.filters.verdict, reviewLabel);
 }
 
-function renderHero() {
+function renderOverview() {
   const t = state.summary.totals;
   const all = state.secrets;
   const open = all.filter((x) => x.state === "open");
-  const toRotate = open.filter((x) => x.verdict === "confirmed");
+  const reviewed = all.filter((x) => x.verdict !== "unjudged");
   const unreviewed = open.filter((x) => x.verdict === "unjudged");
-  const rotated = all.filter((x) => x.state === "rotated").length;
-  const dismissed = all.filter((x) => x.state === "dismissed").length;
+  const real = open.filter((x) => x.verdict === "confirmed");
+  const resolved = all.filter((x) => x.state !== "open");
   const critHigh = open.filter((x) => x.severity === "critical" || x.severity === "high").length;
   const sessions = new Set(state.findings.map((r) => r.session)).size;
+  const plural = (n, one, many) => `${fmtInt(n)} ${n === 1 ? one : many}`;
+  const go = (label, fn) => h("button", { class: "btn accent", onclick: fn }, label);
 
-  $("hero-num").textContent = fmtInt(open.length);
-  $("hero-sub").textContent = all.length
-    ? `distinct values still open, of ${fmtInt(all.length)} detected · ${fmtInt(t.findings)} findings across ${fmtInt(t.sessions)} sessions · ${fmtInt(t.events)} events scanned`
-    : `${fmtInt(t.events)} events scanned across ${fmtInt(t.sessions)} sessions`;
-
-  const bySev = countBy(open, "severity");
-  const bar = $("sevbar");
-  bar.replaceChildren();
-  const total = open.length || 1;
-  for (const sev of SEVERITIES) {
-    const n = bySev.get(sev) || 0;
-    if (!n) continue;
-    const seg = h("div", { class: "seg", style: `width:${Math.max(1.5, (n / total) * 100)}%; background:${cssVar(SEV_VAR[sev])}` });
-    seg.addEventListener("pointermove", (e) => showTip(e, `${n} ${sev}`, [`${Math.round((n / total) * 100)}% of ${open.length} open secrets`]));
-    seg.addEventListener("pointerleave", hideTip);
-    bar.append(seg);
-  }
-  if (!open.length) bar.append(h("div", { class: "empty" }, all.length ? "nothing open" : "nothing detected"));
-  $("sevlegend").replaceChildren(
-    ...SEVERITIES.map((sev) => h("span", { class: "sev-" + sev }, h("span", { class: "tag" }, sev), h("b", {}, fmtInt(bySev.get(sev) || 0))))
-  );
-
-  const stats = [
-    ["to rotate", fmtInt(toRotate.length), "open and confirmed by the model"],
-    ["unreviewed", fmtInt(unreviewed.length), unreviewed.length ? "open, no verdict yet" : "every open secret has a verdict"],
-    ["critical + high", fmtInt(critHigh), open.length ? `${Math.round((critHigh / open.length) * 100)}% of open` : "—"],
-    ["sessions affected", fmtInt(sessions), `of ${fmtInt(t.sessions)} scanned`],
-    ["rotated · dismissed", `${fmtInt(rotated)} · ${fmtInt(dismissed)}`, "your decisions, kept across rescans"],
-    ["last scan", relTime(state.summary.last_scan), state.summary.last_scan ? asDate(state.summary.last_scan).toLocaleString() : "—"],
-  ];
-  $("hero-stats").replaceChildren(
-    ...stats.map(([k, v, sub]) => h("div", { class: "stat" }, h("div", { class: "k" }, k), h("div", { class: "v" }, v), h("div", { class: "s" }, sub)))
-  );
-
-  // One sentence on what to do next, in priority order: scan, judge, rotate, done.
-  const step = $("next-step");
-  const go = (label, fn, accent) => h("button", { class: "btn small" + (accent ? " accent" : ""), onclick: fn }, label);
+  // The whole state of affairs in one sentence, one tone, one action.
+  let tone, head, sub, action = null;
   if (!state.findings.length) {
-    step.replaceChildren(`No findings yet. Scan reads the transcripts under ${state.summary.transcripts_dir} and stores fingerprints, never values.`, go("scan", runScan, true));
+    tone = t.events ? "ok" : "idle";
+    head = t.events ? "Nothing sensitive was found in your transcripts." : "Nothing scanned yet.";
+    sub = t.events
+      ? `${fmtInt(t.events)} messages across ${plural(t.sessions, "session", "sessions")} were checked against ${fmtInt(235)} patterns.`
+      : "Scan reads your Claude Code transcripts on this machine and keeps a fingerprint of each secret, never the value.";
+    if (!t.events) action = go("scan now", runScan);
   } else if (unreviewed.length) {
-    step.replaceChildren(`${fmtInt(unreviewed.length)} open secret${unreviewed.length === 1 ? " has" : "s have"} no verdict yet. Judge sorts them into confirmed, benign and unsure with the local model.`, go("judge", runJudge, true));
-  } else if (toRotate.length) {
-    step.replaceChildren(`${fmtInt(toRotate.length)} confirmed secret${toRotate.length === 1 ? " is" : "s are"} still open. Rotate them at the provider, then mark them here.`, go("open secrets", () => showTab("secrets")));
+    tone = "warn";
+    head = `${plural(all.length, "secret or personal record was", "secrets and personal records were")} shared with Claude across ${sessions} of your ${plural(t.sessions, "session", "sessions")}.`;
+    sub = `${unreviewed.length === all.length ? "None have" : `${fmtInt(unreviewed.length)} have not`} been reviewed yet. The local model sorts them into real, not real and unsure — about ten seconds each, and nothing leaves this machine.`;
+    action = go("review now", runJudge);
+  } else if (real.length) {
+    tone = "crit";
+    head = `${plural(real.length, "real secret needs", "real secrets need")} rotating.`;
+    sub = `Rotate ${real.length === 1 ? "it" : "them"} at the provider, then mark ${real.length === 1 ? "it" : "them"} rotated here. ${critHigh ? `${fmtInt(critHigh)} ${critHigh === 1 ? "is" : "are"} critical or high.` : ""}`;
+    action = go("see the list", () => showTab("secrets"));
   } else {
-    step.replaceChildren("All clear: every detected value is rotated, dismissed or benign.");
+    tone = "ok";
+    head = "All clear.";
+    sub = `${plural(all.length, "value was", "values were")} shared; ${fmtInt(resolved.length)} resolved by you, the rest judged not real.`;
+  }
+  $("status-band").replaceChildren(
+    h("span", { class: "sdot " + tone }),
+    h("div", { class: "status-text" }, h("div", { class: "status-head" }, head), h("div", { class: "status-sub" }, sub)),
+    action,
+  );
+
+  // Shared -> reviewed -> real -> resolved. Four numbers that read left to right.
+  const cells = [
+    ["shared", fmtInt(all.length), `distinct values · ${fmtInt(critHigh)} critical or high`],
+    ["reviewed", fmtInt(reviewed.length), all.length ? `of ${fmtInt(all.length)}, by the local model` : "—"],
+    ["confirmed real", fmtInt(real.length), real.length ? "still open, need rotating" : reviewed.length ? "none open" : "not known yet"],
+    ["resolved", fmtInt(resolved.length), "rotated or dismissed by you"],
+  ];
+  $("funnel").replaceChildren(
+    ...cells.map(([k, v, sub2], i) => h("div", { class: "fcell" + (i === 2 && real.length ? " hot" : "") },
+      h("div", { class: "k" }, k), h("div", { class: "v" }, v), h("div", { class: "s" }, sub2)))
+  );
+
+  // The five worst open items, with their actions, without opening a tab.
+  const worst = [...open].sort((a, b) => sevRank(a.severity) - sevRank(b.severity) || (b.verdict === "confirmed") - (a.verdict === "confirmed") || b.findings - a.findings);
+  const top = worst.slice(0, 5);
+  $("attention-sub").textContent = open.length > top.length ? `${top.length} of ${fmtInt(open.length)} open` : open.length ? `${open.length} open` : "";
+  const list = $("attention");
+  if (!top.length) {
+    list.replaceChildren(h("div", { class: "empty-state" }, state.findings.length ? "nothing open — every value is rotated or dismissed" : "nothing to act on"));
+  } else {
+    list.replaceChildren(...top.map((x) => h("div", { class: "arow" },
+      h("span", { class: "tag sev-" + x.severity }, sevShort(x.severity)),
+      h("span", { class: "acat" }, catLabel(x.category)),
+      h("span", { class: "aprev mono", title: x.preview }, x.preview),
+      h("span", { class: "pill " + (x.verdict === "unjudged" ? "unsure" : x.verdict) }, reviewLabel(x.verdict)),
+      h("span", { class: "muted mono" }, `${x.sessions} session${x.sessions === 1 ? "" : "s"}`),
+      h("span", { class: "acts" },
+        h("button", { class: "btn ghost", onclick: () => setSecretState(x.fingerprint, "rotated") }, "rotated"),
+        h("button", { class: "btn ghost", onclick: () => setSecretState(x.fingerprint, "dismissed") }, "dismiss")),
+    )), open.length > top.length ? h("a", { class: "more", href: "#secrets", onclick: (e) => { e.preventDefault(); showTab("secrets"); } }, `all ${fmtInt(open.length)} open secrets →`) : null);
   }
 }
 
@@ -446,9 +476,9 @@ function niceStep(max) {
 function renderCharts(rows) {
   const total = rows.length;
   const byCat = [...countBy(rows, "category")].sort((a, b) => b[1] - a[1]);
-  hbars($("c-category"), byCat.map(([k, v]) => ({ label: k, value: v })), { total });
+  hbars($("c-category"), byCat.map(([k, v]) => ({ label: catLabel(k), value: v })), { total });
   const bySrc = [...countBy(rows, "source")].sort((a, b) => b[1] - a[1]);
-  hbars($("c-source"), bySrc.map(([k, v]) => ({ label: k, value: v })), { total });
+  hbars($("c-source"), bySrc.map(([k, v]) => ({ label: srcLabel(k), value: v })), { total });
 
   const days = new Map();
   for (const r of rows) if (r.ts) { const d = r.ts.slice(0, 10); days.set(d, (days.get(d) || 0) + 1); }
@@ -482,8 +512,8 @@ function renderSecrets() {
   const note = $("secrets-note");
   note.hidden = !unjudged;
   if (unjudged) {
-    note.replaceChildren(`${fmtInt(unjudged)} of these have no verdict yet — the model has not looked at them. `,
-      h("a", { href: "#model", onclick: (e) => { e.preventDefault(); runJudge(); } }, "judge now"));
+    note.replaceChildren(`${fmtInt(unjudged)} of these have not been reviewed — the local model has not looked at them yet. `,
+      h("a", { href: "#model", onclick: (e) => { e.preventDefault(); runJudge(); } }, "review now"));
   }
   if (!rows.length) {
     el.replaceChildren(h("div", { class: "empty-state" }, state.secrets.length
@@ -500,13 +530,13 @@ function renderSecrets() {
     }
     const row = h("div", { class: "srow" + (s.state === "open" ? "" : " done"), role: "button", tabindex: 0,
       onclick: () => { state.secretOpen = state.secretOpen === s.fingerprint ? null : s.fingerprint; renderSecrets(); } },
-      h("span", { class: "tag sev-" + s.severity }, s.severity === "critical" ? "crit" : s.severity === "medium" ? "med" : s.severity),
-      h("span", { class: "cat", title: s.category }, s.category),
+      h("span", { class: "tag sev-" + s.severity }, sevShort(s.severity)),
+      h("span", { class: "cat", title: s.category }, catLabel(s.category)),
       h("span", { class: "prev", title: s.preview }, s.preview),
-      h("span", {}, h("span", { class: "pill " + (s.verdict === "unjudged" ? "unsure" : s.verdict) }, s.verdict)),
-      h("span", {}, `${s.sessions} / ${s.findings}`),
+      h("span", {}, h("span", { class: "pill " + (s.verdict === "unjudged" ? "unsure" : s.verdict) }, reviewLabel(s.verdict))),
+      h("span", {}, `${s.sessions} · ${s.findings}×`),
       h("span", { class: "t" }, `${fmtDay(s.first_seen)} · ${fmtDay(s.last_seen)}`),
-      h("span", { class: "src", title: (s.sources || []).join(", ") }, (s.sources || []).join(", ")),
+      h("span", { class: "src", title: (s.sources || []).map(srcLabel).join(", ") }, (s.sources || []).map(srcLabel).join(", ")),
       acts,
     );
     out.push(row);
@@ -542,15 +572,15 @@ function renderFeed(rows) {
   const out = [];
   for (const r of rows.slice(0, LIMIT)) {
     const verdict = r.verdict
-      ? h("span", { class: "pill " + r.verdict + (state.fresh.has(r.id) ? " fresh" : "") }, r.verdict)
+      ? h("span", { class: "pill " + r.verdict + (state.fresh.has(r.id) ? " fresh" : "") }, reviewLabel(r.verdict))
       : h("span", { class: "muted" }, "—");
     const row = h("div", { class: "row", role: "button", tabindex: 0,
       onclick: () => { state.expanded = state.expanded === r.id ? null : r.id; renderFeed(filtered()); } },
       h("span", { class: "t", title: r.ts ? asDate(r.ts).toLocaleString() : "" }, `${fmtDay(r.ts)} ${fmtTime(r.ts)}`),
-      h("span", { class: "tag sev-" + r.severity }, r.severity === "critical" ? "crit" : r.severity === "medium" ? "med" : r.severity),
-      h("span", { class: "cat", title: r.category }, r.category),
+      h("span", { class: "tag sev-" + r.severity }, sevShort(r.severity)),
+      h("span", { class: "cat", title: r.category }, catLabel(r.category)),
       h("span", { class: "prev", title: r.preview }, r.preview),
-      h("span", { class: "src", title: r.path || "" }, r.source),
+      h("span", { class: "src", title: r.path || "" }, srcLabel(r.source)),
       h("span", { class: "proj", title: r.path ? `${r.project}\n${r.path}` : r.project }, r.path ? shortProject(r.path) : shortProject(r.project)),
       h("span", {}, verdict),
     );
@@ -560,7 +590,7 @@ function renderFeed(rows) {
         h("div", {}, h("b", {}, "finding "), h("span", { class: "mono" }, r.id), "  ·  session ", h("span", { class: "mono" }, r.session || "")),
         h("div", {}, h("b", {}, "project "), h("span", { class: "mono" }, r.project || ""), r.path ? ["  ·  ", h("b", {}, "file "), h("span", { class: "mono" }, r.path)] : null),
         r.verdict
-          ? h("div", {}, h("b", {}, `${r.judged_by === "rules" ? "rule" : "model"}: ${r.verdict}`), " — ", r.reason || "")
+          ? h("div", {}, h("b", {}, `${r.judged_by === "rules" ? "by rule" : "by the model"}: ${reviewLabel(r.verdict)}`), " — ", r.reason || "")
           : h("div", { class: "muted" }, "not yet reviewed"),
         h("div", { class: "muted mono" }, `raw value, locally: claudit reveal ${r.id}`),
       ));
