@@ -62,6 +62,10 @@ Expected outcome, written before the run: the student should match on confirmed 
 seen that vocabulary) and be worse on benign/heldout. If it matches on heldout too, the concept transferred;
 if it collapses there, we say so.
 
+**Outcome (2026-09-13).** Matched on both: 53/53 real kept, 0 dismissed, 9/12 seen-benign, 0 unparseable, at
+p50 1.5 s vs 11.5 s and 559 MB vs 5.1 GB. Held-out 0/11 vs the teacher's 1/11 on the same day — neither
+generalises there, and the student did not learn what it was not taught. Numbers in `docs/eval-report.md`.
+
 ## Not doing
 
 - No fusing or GGUF export; the adapter is loaded on top of the base. Simpler, and the base stays shared.

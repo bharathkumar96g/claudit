@@ -59,7 +59,43 @@ are dismissed under v7; one was under v5.
 
 ### Distilled student (Qwen2.5-0.5B-Instruct-4bit + LoRA, prompt masked)
 
-<!-- DISTILL RESULTS -->
+Protocol: the seed-7 test set (76 plants) scanned into two fresh databases; the 7B teacher and the student each
+judged through the unchanged `claudit judge` pipeline (routing, instruction stripping, policy, scrubbing);
+`claudit distill compare` reads both. Both runs on 2026-09-13 on an M4 with nothing else on the GPU.
+
+| | qwen2.5:7b (teacher) | claudit-student (0.5B, LoRA) |
+|---|---|---|
+| real secrets kept / dismissed | **53 / 0** | **53 / 0** |
+| fake, seen wording → likely fake | 9 / 12 | 9 / 12 |
+| fake, held-out wording → likely fake | 1 / 11 | 0 / 11 |
+| unparseable output | 0 / 64 | 0 / 64 |
+| latency p50 / p95 per call | 11.5 s / 14.0 s | **1.5 s / 1.6 s** |
+| resident memory while serving | 5.1 GB | **559 MB** |
+| model calls / by rule | 64 / 12 | 64 / 12 |
+
+**Training data.** A separate corpus (`synth --sessions 400 --seed 11`): 575 plants, teacher verdicts 295
+confirmed / 99 unsure / 75 benign by model + 106 by rule. Dataset 427 train / 62 valid; 86 held-out benign
+plants excluded so the held-out column stays a test. Verdicts from labels, reasons from the teacher where it
+agreed (347) and a template otherwise (142). LoRA on `Qwen2.5-0.5B-Instruct-4bit`, 8 layers, batch 1,
+lr 1e-4, prompt masked; validation loss 2.261 → 0.538 → 0.457 → 0.373 → 0.325 → 0.308 → 0.295 at iterations
+1/100/…/600, still falling. 28 minutes.
+
+**Reading it.** The student reproduces the teacher on the two columns that matter for a security tool — no
+real secret dismissed, familiar fake markers recognised — at one seventh of the latency and one ninth of
+the memory, and never breaks the JSON format. It does not generalise to held-out wording, but neither does
+the teacher on this run (1/11): the policy cap sends vendor keys with prose-only markers to *needs you*, and
+that is where both models put them. Before training, the bare 0.5B base answered a single word, no JSON,
+and called a test fixture real.
+
+**Teacher re-run variance.** The number of record for v7 (49 real kept + 4 needs-you, 3/11 held-out) came
+from an earlier run; today's teacher run on the same set gives 53/0/0 and 1/11 with five more values routed
+to the model. Same prompt, temperature 0; the difference is run-to-run variation in the local model plus
+ingest fixes since that report. The comparison uses the same-day run for both models rather than the
+better-looking historical one.
+
+**Not claimed.** One seed, one base model, one test set of 76. A larger held-out set and a second base model
+are the next measurements, not this one.
+
 
 ### Known failure modes
 

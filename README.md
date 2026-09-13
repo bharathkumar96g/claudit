@@ -191,7 +191,23 @@ pipeline (routing, instruction stripping, policy, scrubbing) is pointed at it an
 There is no JSON grammar at decode time on purpose: the student's unparseable-output rate is measured, not
 hidden. Design: [06-distilled-judge](docs/design/06-distilled-judge.md).
 
-<!-- DISTILL RESULTS -->
+**Result** (same 76-value test set, same code path, both judged on 2026-09-13 with the GPU uncontended):
+
+| | qwen2.5:7b (teacher) | claudit-student (0.5B, LoRA) |
+|---|---|---|
+| real secrets kept / dismissed | **53 / 0** | **53 / 0** |
+| fake, seen wording → likely fake | 9 / 12 | 9 / 12 |
+| fake, held-out wording → likely fake | 1 / 11 | 0 / 11 |
+| unparseable output | 0 / 64 | 0 / 64 |
+| latency p50 / p95 per call | 11.5 s / 14.0 s | **1.5 s / 1.6 s** |
+| resident memory while serving | 5.1 GB | **559 MB** |
+| model calls / by rule | 64 / 12 | 64 / 12 |
+
+The student keeps every real secret, dismisses none, matches the teacher on familiar benign wording, and answers in
+well-formed JSON every time without a grammar. On held-out wording both are near zero (1/11 vs 0/11): the
+concept did not transfer any better than it was taught, and the table says so. Training: 427 examples, 600
+iterations, validation loss 2.26 → 0.30 and still falling. Full write-up in [docs/eval-report.md](docs/eval-report.md#distilled-student).
+
 
 ---
 
