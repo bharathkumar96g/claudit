@@ -332,3 +332,11 @@ tr.after td { color: var(--crit); }
 }
 .info:hover, .info:focus { color: var(--ink); border-color: var(--ink-2); outline: none; }
 .tooltip strong { text-transform: none; }
+
+/* sortable headers + pager */
+.feed-head .sortable { cursor: pointer; user-select: none; }
+.feed-head .sortable:hover { color: var(--ink-2); }
+.feed-head .sorted { color: var(--ink); }
+.feed-head .arrow { color: var(--accent); }
+.pager { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 12px 8px 4px; }
+.filters input[type="date"] { min-width: 0; width: 150px; }

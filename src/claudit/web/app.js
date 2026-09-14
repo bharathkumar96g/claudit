@@ -66,7 +66,9 @@ const state = {
   secretOpen: null,
   health: null,
   metrics: null,
-  filters: { severity: "", category: "", source: "", project: "", verdict: "", q: "" },
+  filters: { severity: "", category: "", source: "", project: "", verdict: "", q: "", since: "", from: "", to: "" },
+  sort: { grouped: { key: "", dir: "desc" }, flat: { key: "", dir: "desc" } },
+  page: { grouped: 0, flat: 0 },
   expanded: null,
   job: null,
   seenVerdicts: new Set(),
@@ -203,9 +205,25 @@ function rankSecrets(list) {
     b.sessions - a.sessions);
 }
 
+const PAGE_SIZE = 50;
+const EMPTY_FILTERS = { severity: "", category: "", source: "", project: "", verdict: "", q: "", since: "", from: "", to: "" };
+
+// The active time window as [fromMs, toMs]; presets win over the custom dates when both are set.
+function timeWindow() {
+  const f = state.filters;
+  const hours = { "24h": 24, "7d": 24 * 7, "30d": 24 * 30 }[f.since];
+  if (hours) return [Date.now() - hours * 3600000, Infinity];
+  const from = f.from ? new Date(f.from + "T00:00:00").getTime() : -Infinity;
+  const to = f.to ? new Date(f.to + "T23:59:59.999").getTime() : Infinity;
+  return [from, to];
+}
+const inWindow = (iso, win) => { if (!iso) return win[0] === -Infinity; const t = asDate(iso).getTime(); return t >= win[0] && t <= win[1]; };
+
 function matchesFilters(secret) {
   const f = state.filters, q = f.q.trim().toLowerCase();
+  const win = timeWindow();
   return (!f.severity || secret.severity === f.severity) &&
+    inWindow(secret.last_seen, win) &&
     (!f.category || secret.category === f.category) &&
     (!f.source || (secret.sources || []).includes(f.source)) &&
     (!f.project || (secret.projects || []).includes(f.project)) &&
@@ -216,8 +234,10 @@ function matchesFilters(secret) {
 
 function filteredFindings() {
   const f = state.filters, q = f.q.trim().toLowerCase();
+  const win = timeWindow();
   return state.findings.filter((x) =>
     (!f.severity || x.severity === f.severity) &&
+    inWindow(x.ts, win) &&
     (!f.category || x.category === f.category) &&
     (!f.source || x.source === f.source) &&
     (!f.project || x.project === f.project) &&
@@ -604,6 +624,52 @@ function shortProject(p) {
   return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : p;
 }
 
+// Column sorting: a chosen key replaces the default ranking; clicking the same key flips direction.
+const SORT_KEYS = {
+  grouped: { severity: (x) => sevRank(x.severity), type: (x) => x.category, review: (x) => VERDICT_RANK[x.verdict] ?? 9,
+             sessions: (x) => x.sessions, times: (x) => x.findings, first: (x) => x.first_seen || "", last: (x) => x.last_seen || "" },
+  flat: { seen: (x) => x.ts || "", severity: (x) => sevRank(x.severity), type: (x) => x.category,
+          origin: (x) => x.source, project: (x) => x.project || "", review: (x) => VERDICT_RANK[x.verdict || "unjudged"] ?? 9 },
+};
+function sortRows(rows, view) {
+  const { key, dir } = state.sort[view];
+  const get = SORT_KEYS[view][key];
+  if (!get) return rows;
+  const sign = dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => { const x = get(a), y = get(b); return (x < y ? -1 : x > y ? 1 : 0) * sign; });
+}
+function setSort(view, key) {
+  const cur = state.sort[view];
+  state.sort[view] = cur.key === key ? { key: cur.dir === "desc" ? key : "", dir: cur.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" };
+  state.page[view] = 0;
+  renderSecrets();
+}
+function markSortHeaders(view, headId, keys) {
+  const cells = $(headId).children;
+  const { key, dir } = state.sort[view];
+  keys.forEach((k, i) => {
+    const cell = cells[i];
+    if (!cell) return;
+    cell.classList.toggle("sortable", !!k);
+    cell.classList.toggle("sorted", !!k && key === k);
+    const arrow = cell.querySelector(".arrow");
+    if (arrow) arrow.textContent = k && key === k ? (dir === "asc" ? " ↑" : " ↓") : "";
+  });
+}
+// A page of rows plus a pager; small lists get no pager.
+function paginate(rows, view) {
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  state.page[view] = Math.min(state.page[view], pages - 1);
+  const n = state.page[view];
+  const slice = rows.slice(n * PAGE_SIZE, (n + 1) * PAGE_SIZE);
+  const pager = rows.length > PAGE_SIZE ? h("div", { class: "pager" },
+    h("button", { class: "btn ghost small", disabled: n === 0 ? "" : null, onclick: () => { state.page[view] = n - 1; renderSecrets(); } }, "← previous"),
+    h("span", { class: "mono muted" }, `${fmtInt(n * PAGE_SIZE + 1)}–${fmtInt(Math.min(rows.length, (n + 1) * PAGE_SIZE))} of ${fmtInt(rows.length)}`),
+    h("button", { class: "btn ghost small", disabled: n >= pages - 1 ? "" : null, onclick: () => { state.page[view] = n + 1; renderSecrets(); } }, "next →"),
+  ) : null;
+  return { slice, pager };
+}
+
 function renderSecrets() {
   const grouped = state.view === "grouped";
   $("secrets-head").hidden = !grouped; $("secrets").hidden = !grouped;
@@ -612,7 +678,8 @@ function renderSecrets() {
   if (!grouped) { renderFeed(filteredFindings()); return; }
 
   const inState = state.secretsState === "all" ? state.secrets : state.secrets.filter((x) => x.state === state.secretsState || (state.secretsState === "open" && x.reappeared));
-  const rows = rankSecrets(inState.filter(matchesFilters));
+  const rows = sortRows(rankSecrets(inState.filter(matchesFilters)), "grouped");
+  markSortHeaders("grouped", "secrets-head", ["severity", "type", null, "review", "sessions", "first", null, null]);
   const el = $("secrets");
   $("secrets-count").textContent = `${fmtInt(rows.length)} ${state.secretsState === "all" ? "" : state.secretsState} ${rows.length === 1 ? "value" : "values"}${rows.length !== inState.length ? ` of ${fmtInt(inState.length)}` : ""}`;
   const unjudged = rows.filter((x) => x.verdict === "unjudged").length;
@@ -628,8 +695,9 @@ function renderSecrets() {
       inState.length ? h("button", { class: "btn small", onclick: () => $("f-clear").click() }, "clear filters") : null));
     return;
   }
+  const { slice, pager } = paginate(rows, "grouped");
   const out = [];
-  for (const s of rows) {
+  for (const s of slice) {
     const acts = h("span", { class: "acts" });
     for (const [label, target] of [["mark rotated", "rotated"], ["not a secret", "dismissed"], ["reopen", "open"]]) {
       if (target === s.state && !s.reappeared) continue;
@@ -651,7 +719,7 @@ function renderSecrets() {
     out.push(row);
     if (state.secretOpen === s.fingerprint) out.push(...secretDetail(s));
   }
-  el.replaceChildren(...out);
+  el.replaceChildren(...out, pager);
 }
 
 // One secret's history: its lifetime strip, every appearance with where it sat, and what to do.
@@ -683,9 +751,10 @@ function secretDetail(s) {
 }
 
 function renderFeed(rows) {
-  const LIMIT = 400;
+  rows = sortRows(rows, "flat");
+  markSortHeaders("flat", "feed-head", ["seen", "severity", "type", null, "origin", "project", "review"]);
   const feed = $("feed");
-  $("secrets-count").textContent = rows.length > LIMIT ? `${LIMIT} of ${fmtInt(rows.length)}` : `${fmtInt(rows.length)} appearance${rows.length === 1 ? "" : "s"}`;
+  $("secrets-count").textContent = `${fmtInt(rows.length)} appearance${rows.length === 1 ? "" : "s"}${rows.length !== state.findings.length ? ` of ${fmtInt(state.findings.length)}` : ""}`;
   $("secrets-note").hidden = true;
   if (!rows.length) {
     const filtering = rows.length !== state.findings.length;
@@ -695,8 +764,9 @@ function renderFeed(rows) {
                 : h("button", { class: "btn accent small", onclick: runScan }, "scan transcripts")));
     return;
   }
+  const { slice, pager } = paginate(rows, "flat");
   const out = [];
-  for (const r of rows.slice(0, LIMIT)) {
+  for (const r of slice) {
     const verdict = r.verdict
       ? pill(r.verdict + (state.fresh.has(r.id) ? " fresh" : ""), reviewLabel(r.verdict))
       : h("span", { class: "muted" }, "—");
@@ -722,7 +792,7 @@ function renderFeed(rows) {
       ));
     }
   }
-  feed.replaceChildren(...out);
+  feed.replaceChildren(...out, pager);
 }
 
 // ---------- review tab ----------
@@ -918,13 +988,23 @@ async function runSynth() {
 }
 
 // ---------- wiring ----------
-for (const [id, key] of [["f-severity", "severity"], ["f-category", "category"], ["f-source", "source"], ["f-project", "project"], ["f-verdict", "verdict"]]) {
-  $(id).addEventListener("change", (e) => { state.filters[key] = e.target.value; renderSecrets(); });
+for (const [id, key] of [["f-severity", "severity"], ["f-category", "category"], ["f-source", "source"], ["f-project", "project"], ["f-verdict", "verdict"], ["f-since", "since"], ["f-from", "from"], ["f-to", "to"]]) {
+  $(id).addEventListener("change", (e) => { state.filters[key] = e.target.value; state.page = { grouped: 0, flat: 0 }; renderSecrets(); });
 }
-$("f-q").addEventListener("input", (e) => { state.filters.q = e.target.value; renderSecrets(); });
+$("f-since").addEventListener("change", () => { $("f-range").hidden = $("f-since").value !== "custom"; if ($("f-since").value !== "custom") { state.filters.from = state.filters.to = ""; $("f-from").value = $("f-to").value = ""; } renderSecrets(); });
+$("f-q").addEventListener("input", (e) => { state.filters.q = e.target.value; state.page = { grouped: 0, flat: 0 }; renderSecrets(); });
+for (const [headId, view, keys] of [["secrets-head", "grouped", ["severity", "type", null, "review", "sessions", "first", null, null]], ["feed-head", "flat", ["seen", "severity", "type", null, "origin", "project", "review"]]]) {
+  [...$(headId).children].forEach((cell, i) => {
+    if (!keys[i]) return;
+    cell.append(h("span", { class: "arrow" }));
+    cell.addEventListener("click", () => setSort(view, keys[i]));
+  });
+}
 $("f-clear").addEventListener("click", () => {
-  state.filters = { severity: "", category: "", source: "", project: "", verdict: "", q: "" };
-  $("f-q").value = "";
+  state.filters = { ...EMPTY_FILTERS };
+  state.sort = { grouped: { key: "", dir: "desc" }, flat: { key: "", dir: "desc" } };
+  state.page = { grouped: 0, flat: 0 };
+  $("f-q").value = ""; $("f-since").value = ""; $("f-from").value = ""; $("f-to").value = ""; $("f-range").hidden = true;
   renderFilterOptions();
   renderSecrets();
 });
