@@ -133,9 +133,10 @@ body {
 .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
 
 /* secrets checklist */
-.secrets-grid, .srow { display: grid; grid-template-columns: 62px 170px minmax(120px, 1fr) 96px 64px 150px 120px 150px; gap: 10px; align-items: center; }
+.secrets-grid, .feed-head.secrets-grid, .srow { display: grid; grid-template-columns: 88px 170px minmax(120px, 1fr) 112px 118px 150px 150px 210px; gap: 10px; align-items: center; }
+.feed-head > span { white-space: nowrap; }
 @media (max-width: 1100px) {
-  .secrets-grid, .srow { grid-template-columns: 62px 150px minmax(100px, 1fr) 96px 64px 150px; }
+  .secrets-grid, .feed-head.secrets-grid, .srow { grid-template-columns: 88px 150px minmax(100px, 1fr) 112px 118px 210px; }
   .secrets-grid > :nth-child(6), .srow > :nth-child(6), .secrets-grid > :nth-child(7), .srow > :nth-child(7) { display: none; }
 }
 .srow { padding: 7px 8px; border-bottom: 1px solid var(--line); font: 12px var(--mono); cursor: pointer; }
